@@ -51,6 +51,37 @@ min_obs_econ   = 24            # mínimo de meses para o ETS das economias
 # por categoria, inflaria o total. No não residencial as categorias são estáveis.
 economias_agrega_categorias = c(Residencial = TRUE, Nao_Residencial = FALSE)
 
+## Premissa de novas economias (engenharia) -------------------------------------
+# Planilha "ALAVANCA DE VOLUME - NOVAS ECONOMIAS": entregas mensais de 2027 por
+# município x utilização x tipo de ligação. Nos meses cobertos ela substitui o
+# ETS: estoque = estoque do mês anterior + entregas acumuladas. Antes dela
+# (set-dez/2026) vale o ETS. Com usar_premissa_economias = FALSE, só ETS.
+usar_premissa_economias      = TRUE
+arq_premissa_economias       = file.path(dir_bases, "ALAVANCA DE VOLUME - NOVAS ECONOMIAS 2027.xlsx")
+premissa_economias_segmentos = "Residencial"
+
+# "Utilização" da engenharia -> categoria_detalhe x recorte da base. O
+# incremento é repartido entre as chaves do município pelo estoque de economias
+# do último mês (inclusive entre as ATCs de SP, Osasco e Guarulhos).
+de_para_utilizacao = tribble(
+  ~utilizacao,     ~categoria_detalhe,              ~recorte,
+  "Normal",        "Residencial Normal",            "Urbano",
+  "Normal",        "Residencial Normal",            "Informal",
+  "Rural",         "Residencial Normal",            "Rural",
+  "Tarifa Social", "Residencial Social",            "Urbano",
+  "Tarifa Social", "Residencial Social",            "Informal",
+  "Tarifa Social", "Residencial Social Vulnerável", "Urbano",
+  "Tarifa Social", "Residencial Social Vulnerável", "Informal"
+)
+
+# Municípios fora da premissa: "ets" (seguem a tendência) | "zero" (estoque constante)
+economias_fora_premissa = "ets"
+
+# Cobertura: "municipio_servico" = município sem linha de esgoto na planilha
+# segue o ETS no esgoto (~110 municípios têm linha de esgoto, 204 de água);
+# "municipio" = estar na planilha cobre água e esgoto (sem linha = sem entrega)
+cobertura_premissa = "municipio_servico"
+
 # Outliers: tsclean no consumo/economia em todo o histórico (que é o treino)
 tratar_outliers = TRUE
 
@@ -113,6 +144,17 @@ tic("Total")
 # 1. IMPORTAÇÃO E PREMISSAS GLOBAIS --------------------------------------------
 
 bases = map(segmentos, ~ carrega_base(.x$arq_base, .x$categorias))
+
+premissa_economias = if (usar_premissa_economias) {
+  le_premissa_economias(arq_premissa_economias)
+} else NULL
+
+if (!is.null(premissa_economias)) {
+  premissa_economias %>%
+    group_by(utilizacao, tipo) %>%
+    summarise(municipios = n_distinct(municipio), incremento = sum(incremento), .groups = "drop") %>%
+    print()
+}
 
 glob_exog = exog_global(bases$Residencial)
 fim_hist  = yearmonth(max(glob_exog$periodo))
@@ -243,7 +285,27 @@ projeta_alvo = function(seg, alvo, agrup, modelo, ajuste_elasticidade) {
   ## Economias -----------------------------------------------------------------
 
   econ = projeta_economias(base_ts, ativas, periodos_proj, fim_hist, n_workers, min_obs_econ,
-                           agrega_categorias = economias_agrega_categorias[[seg]])
+                           agrega_categorias = economias_agrega_categorias[[seg]]) %>%
+    mutate(n_economias_ets = n_economias)
+
+  premissa_resumo = NULL
+
+  if (!is.null(premissa_economias) && seg %in% premissa_economias_segmentos) {
+
+    alocacao = aloca_premissa_economias(premissa_economias, base_chave, alvo,
+                                        de_para_utilizacao, fim_hist, cobertura_premissa)
+
+    econ = aplica_premissa_economias(econ %>% select(-n_economias_ets), alocacao, base_chave,
+                                     regras_agrupamento[[agrup]], fim_hist, economias_fora_premissa)
+
+    premissa_resumo = alocacao$alocado %>%
+      inner_join(base_chave %>% distinct(chave, cd_regiao_adj, categoria_detalhe, recorte), by = "chave") %>%
+      group_by(cd_regiao_adj, categoria_detalhe, recorte, periodo, regra) %>%
+      summarise(incremento = sum(incremento), .groups = "drop")
+
+    message(glue("Premissa de economias: {number(alocacao$total, big.mark = '.')} no total | ",
+                 "não alocado: {number(alocacao$nao_alocado, big.mark = '.')}"))
+  }
 
   ## Volume --------------------------------------------------------------------
 
@@ -265,9 +327,10 @@ projeta_alvo = function(seg, alvo, agrup, modelo, ajuste_elasticidade) {
            vol = consumo * n_economias,
            vol_eps_baixa = consumo_modelo * (tarifa/irt_ref)^(eps * elasticidade_sens[["baixa"]]) * n_economias,
            vol_eps_alta  = consumo_modelo * (tarifa/irt_ref)^(eps * elasticidade_sens[["alta"]]) * n_economias,
+           vol_econ_ets  = consumo * n_economias_ets,
            tipo = "PROJ") %>%
-    select(all_of(chaves_ts), periodo, tipo, cenario, n_economias, consumo_modelo,
-           fator_tarifa, consumo, vol, vol_eps_baixa, vol_eps_alta, fallback, econ_metodo)
+    select(all_of(chaves_ts), periodo, tipo, cenario, n_economias, n_economias_ets, consumo_modelo,
+           fator_tarifa, consumo, vol, vol_eps_baixa, vol_eps_alta, vol_econ_ets, fallback, econ_metodo)
 
   ## Histórico (real; meses sem dado viram "IMPUTADO") -------------------------
 
@@ -295,7 +358,7 @@ projeta_alvo = function(seg, alvo, agrup, modelo, ajuste_elasticidade) {
   gc()
 
   list(proj = proj, real = real, encerradas = encerradas,
-       resumo_exog = resumo_exog, anomalias = anomalias)
+       resumo_exog = resumo_exog, anomalias = anomalias, premissa = premissa_resumo)
 }
 
 resultados = escolhas %>%
@@ -321,10 +384,12 @@ real  = desaninha("real")
 mensal = bind_rows(
   real %>%
     crossing(cenario = cenarios_proj) %>%
-    mutate(vol_eps_baixa = vol, vol_eps_alta = vol),
+    mutate(vol_eps_baixa = vol, vol_eps_alta = vol,
+           n_economias_ets = n_economias, vol_econ_ets = vol),
   proj) %>%
   group_by(segmento, alvo, cenario, cd_regiao_adj, categoria_detalhe, recorte, periodo, tipo) %>%
-  summarise(across(c(n_economias, vol, vol_eps_baixa, vol_eps_alta), ~ sum(., na.rm = T)),
+  summarise(across(c(n_economias, n_economias_ets, vol, vol_eps_baixa, vol_eps_alta, vol_econ_ets),
+                   ~ sum(., na.rm = T)),
             .groups = "drop") %>%
   mutate(consumo = vol/n_economias,
          periodo = as.Date(periodo))
@@ -333,7 +398,7 @@ mensal = bind_rows(
 resume_anual = function(nivel) {
   mensal %>%
     group_by(segmento, alvo, cenario, across(all_of(nivel)), periodo) %>%
-    summarise(across(c(n_economias, vol, vol_eps_baixa, vol_eps_alta), sum),
+    summarise(across(c(n_economias, n_economias_ets, vol, vol_eps_baixa, vol_eps_alta, vol_econ_ets), sum),
               meses_proj = any(tipo == "PROJ"),
               .groups = "drop") %>%
     mutate(ano = year(periodo)) %>%
@@ -341,7 +406,9 @@ resume_anual = function(nivel) {
     summarise(vol = sum(vol),
               vol_eps_baixa = sum(vol_eps_baixa),
               vol_eps_alta = sum(vol_eps_alta),
+              vol_econ_ets = sum(vol_econ_ets),
               economias_media = mean(n_economias),
+              economias_media_ets = mean(n_economias_ets),
               meses_proj = sum(meses_proj),
               .groups = "drop") %>%
     mutate(consumo_medio = vol/economias_media/12) %>%
@@ -368,6 +435,11 @@ series = resultados %>%
 
 exog_cenarios = desaninha("resumo_exog") %>%
   mutate(periodo = as.Date(periodo))
+
+premissa_alocada = if (!is.null(premissa_economias)) {
+  desaninha("premissa") %>%
+    mutate(periodo = as.Date(periodo))
+} else tibble()
 
 anomalias_el_nino = desaninha("anomalias") %>%
   filter(segmento == "Residencial", alvo == "med_agua") %>%
@@ -399,6 +471,10 @@ premissas = tribble(
   "Nível dos reservatórios", "auto.arima na série histórica",
   "Economias", glue("ETS amortecido no log (séries com {min_obs_econ}+ meses); demais: último valor"),
   "Economias - total entre categorias", paste(names(economias_agrega_categorias), economias_agrega_categorias, sep = ": ", collapse = " | "),
+  "Economias - premissa da engenharia", if (usar_premissa_economias) {
+    glue("{basename(arq_premissa_economias)} ({paste(premissa_economias_segmentos, collapse = ', ')}); ",
+         "fora da premissa: {economias_fora_premissa}; cobertura: {cobertura_premissa}; colunas *_ets = só ETS")
+  } else "não usada",
   "Outliers", if (tratar_outliers) "tsclean no consumo/economia (histórico)" else "sem tratamento",
   "Séries curtas/sem modelo", "fallback: sazonal ingênuo -> média 12m -> segmento"
 )
@@ -478,7 +554,9 @@ write_xlsx(
        mensal = mensal,
        tarifa_e_nivel = glob_proj %>% mutate(periodo = as.Date(periodo)),
        exogenas_cenarios = exog_cenarios,
-       anomalias_el_nino = anomalias_el_nino),
+       anomalias_el_nino = anomalias_el_nino,
+       premissa_economias = premissa_alocada,
+       de_para_utilizacao = de_para_utilizacao),
   file.path(dir_saida, glue("Projecao_Volume_{format(fim_projecao, '%Y%m')}.xlsx")))
 
 toc()

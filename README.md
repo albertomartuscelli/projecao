@@ -59,9 +59,28 @@ Volume = consumo/economia × economias × fator tarifário
 | Clima | Cenário principal `el_nino`: média do mês no histórico + anomalias do El Niño análogo em 2027. Alternativas: `base` (só a média), `quente_seco` e `frio_umido` (±1 desvio-padrão) |
 | CAGED | Tendência dos últimos 12 meses |
 | Nível dos reservatórios | `auto.arima` na série histórica |
-| Economias | ETS amortecido no log; no residencial, projeta o total das categorias e reparte pela participação do último mês (migração normal → social); séries curtas repetem o último valor |
+| Economias | Residencial em 2027: premissa da engenharia (entregas mensais de novas economias por município × utilização × água/esgoto), repartida entre as chaves do município pelo estoque e somada ao estoque de dez/2026. Demais casos: ETS amortecido no log (no residencial, no total das categorias, repartido pela participação do último mês). Colunas `*_ets` mostram o resultado só com ETS |
 | Tarifa real (IRT) | Último valor deflacionado pelo IPCA mês a mês; reajuste nominal de 6,5% em abr/2027 |
 | Fator tarifário | (IRT projetado / IRT médio dos últimos 12 meses) ^ elasticidade |
+
+### Premissa de novas economias (engenharia)
+
+A planilha `ALAVANCA DE VOLUME - NOVAS ECONOMIAS 2027.xlsx` (em `01_BASES`) traz
+as entregas mensais de 2027 por categoria, utilização, município, projeto e tipo
+de ligação. Os nomes são casados com a base sem acento, maiúsculas ou
+pontuação. A "Utilização" mistura categoria e recorte; o de-para fica em
+`de_para_utilizacao` no `03_Projecao.R`:
+
+| Utilização | categoria_detalhe × recorte |
+|---|---|
+| Normal | Residencial Normal × Urbano/Informal |
+| Rural | Residencial Normal × Rural |
+| Tarifa Social | Residencial Social e Social Vulnerável × Urbano/Informal |
+
+O incremento é repartido entre as chaves do município pelo estoque de
+economias do último mês. Sem chave correspondente (ex.: rural onde a base não
+tem chave rural), vai para todas as chaves do município. Municípios fora da
+planilha seguem o ETS (`economias_fora_premissa`).
 
 ### Cenário El Niño (2027)
 

@@ -688,6 +688,161 @@ projeta_economias = function(base_ts, ativas, periodos, fim_hist, n_workers,
 }
 
 
+# Premissa de novas economias (engenharia) ------------------------------------
+
+# Nomes comparáveis: sem acento, maiúsculo, sem pontuação
+normaliza_nome = function(x) {
+  x %>%
+    stringi::stri_trans_general("Latin-ASCII") %>%
+    toupper() %>%
+    str_replace_all("[^A-Z0-9 ]", " ") %>%
+    str_squish()
+}
+
+meses_pt = c(jan = 1, fev = 2, mar = 3, abr = 4, mai = 5, jun = 6,
+             jul = 7, ago = 8, set = 9, out = 10, nov = 11, dez = 12)
+
+# Lê a planilha "ALAVANCA DE VOLUME - NOVAS ECONOMIAS": dimensões (Categoria,
+# Utilização, Município, Projeto, Tipo de ligação) e colunas mensais "jan/27".
+# Ignora a linha de exemplo, cabeçalhos repetidos e a linha de total.
+le_premissa_economias = function(arq, aba = "Novas Economias", categoria = "Residencial") {
+
+  bruto = read_excel(arq, aba, col_names = FALSE, .name_repair = "minimal")
+  lin_cab = which(bruto[[1]] == "Categoria")[1]
+  cab = as.character(unlist(bruto[lin_cab, ]))
+  cab = make.unique(ifelse(is.na(cab) | cab == "", paste0("x", seq_along(cab)), cab))
+
+  dados = bruto[-seq_len(lin_cab), ]
+  names(dados) = cab
+  col_mes = cab[str_detect(cab, "^[a-z]{3}/\\d{2}$")]
+  nota = dados[[ncol(dados)]]
+
+  dados %>%
+    mutate(.nota = nota) %>%
+    filter(.data[[cab[1]]] == categoria,
+           is.na(.nota) | !str_detect(.nota, regex("exemplo", ignore_case = TRUE))) %>%
+    select(categoria = 1, utilizacao = 2, municipio = 3, projeto = 4, tipo = 5, all_of(col_mes)) %>%
+    pivot_longer(all_of(col_mes), names_to = "mes", values_to = "incremento") %>%
+    mutate(incremento = as.numeric(incremento),
+           periodo = yearmonth(make_date(2000 + as.integer(str_sub(mes, 5, 6)),
+                                         meses_pt[str_sub(mes, 1, 3)], 1)),
+           municipio_norm = normaliza_nome(municipio),
+           utilizacao_norm = normaliza_nome(utilizacao),
+           tipo_norm = normaliza_nome(tipo)) %>%
+    filter(!is.na(incremento), incremento != 0)
+}
+
+# Reparte o incremento de cada município x utilização entre as chaves da base,
+# pelo estoque de economias do último mês. `de_para`: utilizacao ->
+# categoria_detalhe x recorte. Sem chave correspondente no município (ex.:
+# rural onde não há chave rural), reparte entre todas as chaves do município.
+# `cobertura`: "municipio_servico" = município coberto só no serviço com linha
+# na planilha (sem linha de esgoto, o esgoto segue fora da premissa);
+# "municipio" = qualquer linha cobre os dois serviços (sem linha = sem entrega).
+aloca_premissa_economias = function(premissa, base_chave, alvo, de_para, fim_hist,
+                                    cobertura = "municipio_servico") {
+
+  servico = if (str_detect(alvo, "agua")) "AGUA" else "ESGOTO"
+
+  municipios = if (cobertura == "municipio") {
+    unique(premissa$municipio_norm)
+  } else {
+    unique(premissa$municipio_norm[premissa$tipo_norm == servico | premissa$tipo_norm %in% c("A E", "AE")])
+  }
+
+  prem = premissa %>%
+    filter(tipo_norm == servico | tipo_norm %in% c("A E", "AE")) %>%
+    group_by(municipio_norm, utilizacao_norm, periodo) %>%
+    summarise(incremento = sum(incremento), .groups = "drop")
+
+  estoque = base_chave %>%
+    filter(periodo == as.Date(fim_hist)) %>%
+    transmute(chave, municipio_norm = normaliza_nome(municipio),
+              categoria_detalhe, recorte, econ)
+
+  pares = prem %>%
+    distinct(municipio_norm, utilizacao_norm)
+
+  dest = pares %>%
+    inner_join(de_para %>% mutate(utilizacao_norm = normaliza_nome(utilizacao)) %>% select(-utilizacao),
+               by = "utilizacao_norm", relationship = "many-to-many") %>%
+    inner_join(estoque, by = c("municipio_norm", "categoria_detalhe", "recorte")) %>%
+    mutate(regra = "de_para")
+
+  dest_mun = pares %>%
+    anti_join(dest, by = c("municipio_norm", "utilizacao_norm")) %>%
+    inner_join(estoque, by = "municipio_norm") %>%
+    mutate(regra = "municipio")
+
+  destinos = bind_rows(dest, dest_mun) %>%
+    group_by(municipio_norm, utilizacao_norm) %>%
+    mutate(peso = econ/sum(econ)) %>%
+    ungroup()
+
+  alocado = prem %>%
+    inner_join(destinos %>% select(municipio_norm, utilizacao_norm, chave, peso, regra),
+               by = c("municipio_norm", "utilizacao_norm"), relationship = "many-to-many") %>%
+    transmute(chave, periodo, incremento = incremento * peso, regra)
+
+  list(alocado = alocado,
+       municipios = municipios,
+       total = sum(prem$incremento),
+       nao_alocado = sum(prem$incremento) - sum(alocado$incremento),
+       por_regra = alocado %>% group_by(regra) %>% summarise(incremento = sum(incremento), .groups = "drop"))
+}
+
+# Substitui o ETS pela premissa a partir do 1º mês dela:
+#   estoque(t) = estoque(mês anterior à premissa) + incremento acumulado
+#                + parte fora da premissa x crescimento do ETS
+# `fora = "ets"`: municípios fora da premissa seguem o ETS; "zero": ficam constantes.
+# Antes da premissa (ex.: set-dez/2026) vale o ETS.
+aplica_premissa_economias = function(econ_ets, alocacao, base_chave, regra, fim_hist, fora = "ets") {
+
+  mapa = base_chave %>%
+    filter(periodo == as.Date(fim_hist)) %>%
+    mutate(grupo = !!regra,
+           municipio_norm = normaliza_nome(municipio)) %>%
+    select(chave, all_of(chaves_ts), municipio_norm, econ)
+
+  s_fora = mapa %>%
+    group_by(across(all_of(chaves_ts))) %>%
+    summarise(s_fora = sum(econ[!municipio_norm %in% alocacao$municipios])/sum(econ),
+              econ_ult = sum(econ),
+              .groups = "drop")
+
+  inc = alocacao$alocado %>%
+    inner_join(mapa %>% select(chave, all_of(chaves_ts)), by = "chave") %>%
+    group_by(across(all_of(chaves_ts)), periodo) %>%
+    summarise(inc = sum(incremento), .groups = "drop")
+
+  p0 = min(alocacao$alocado$periodo)
+  ref = p0 - 1
+
+  econ_ref = if (ref > fim_hist) {
+    econ_ets %>% filter(periodo == ref) %>% select(all_of(chaves_ts), econ_ref = n_economias)
+  } else {
+    s_fora %>% select(all_of(chaves_ts), econ_ref = econ_ult)
+  }
+
+  econ_ets %>%
+    left_join(econ_ref, by = chaves_ts) %>%
+    left_join(s_fora %>% select(-econ_ult), by = chaves_ts) %>%
+    left_join(inc, by = c(chaves_ts, "periodo")) %>%
+    mutate(s_fora = coalesce(s_fora, 1),
+           inc = coalesce(inc, 0)) %>%
+    group_by(across(all_of(chaves_ts))) %>%
+    arrange(periodo, .by_group = TRUE) %>%
+    mutate(inc_acum = cumsum(if_else(periodo >= p0, inc, 0))) %>%
+    ungroup() %>%
+    mutate(usa = periodo >= p0 & (s_fora < 1 | fora == "zero"),
+           cresc_fora = if (fora == "ets") s_fora * (n_economias - econ_ref) else 0,
+           n_economias_ets = n_economias,
+           n_economias = if_else(usa, econ_ref + inc_acum + cresc_fora, n_economias),
+           econ_metodo = if_else(usa, "premissa_engenharia", econ_metodo)) %>%
+    select(all_of(chaves_ts), periodo, n_economias, n_economias_ets, econ_metodo)
+}
+
+
 # 6. ACURÁCIA ------------------------------------------------------------------
 
 metricas = function(real, fit, econ) {
