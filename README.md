@@ -13,7 +13,8 @@ residencial e não residencial.
 | `03_Projecao.R` | Projeção até dez/2027 com a agregação e o modelo escolhidos nos backtests |
 
 Rode na ordem 01 → 02 → 03, com o diretório de trabalho na pasta que contém
-`05_FRAMEWORK_4/`. Os scripts fazem `source("00_Funcoes.R")`, então o arquivo
+`05_FRAMEWORK_4/` (bases de entrada, em `01_BASES`) e `05_FRAMEWORK_5/`
+(saídas). Os scripts fazem `source("00_Funcoes.R")`, então o arquivo
 de funções precisa estar no mesmo diretório de trabalho (ou ajuste o caminho).
 
 ## Backtesting
@@ -40,7 +41,7 @@ Como funciona:
 - Séries curtas ou sem modelo entram com fallback (sazonal ingênuo → média de
   12 meses → média do segmento), para o total do teste ficar completo.
 
-Saídas em `05_FRAMEWORK_4/03_BACKTESTING/<segmento>/`:
+Saídas em `05_FRAMEWORK_5/03_BACKTESTING/<segmento>/`:
 
 - `00_Decisao_<segmento>.xlsx`: decisão por alvo (lida pela projeção), abas
   `melhor_modelo` e `melhor_agregacao`
@@ -54,12 +55,26 @@ Volume = consumo/economia × economias × fator tarifário
 | Componente | Premissa |
 |---|---|
 | Consumo/economia | Modelo e agregação da decisão do backtest, ajustados em todo o histórico |
-| Clima | Média do mês no histórico (`base`); ±1 desvio-padrão nos cenários `quente_seco` e `frio_umido` |
+| Clima | Cenário principal `el_nino`: média do mês no histórico + anomalias do El Niño análogo em 2027. Alternativas: `base` (só a média), `quente_seco` e `frio_umido` (±1 desvio-padrão) |
 | CAGED | Tendência dos últimos 12 meses |
 | Nível dos reservatórios | `auto.arima` na série histórica |
-| Economias | ETS amortecido no log por série; séries curtas repetem o último valor |
+| Economias | ETS amortecido no log; no residencial, projeta o total das categorias e reparte pela participação do último mês (migração normal → social); séries curtas repetem o último valor |
 | Tarifa real (IRT) | Último valor deflacionado pelo IPCA mês a mês; reajuste nominal de 6,5% em abr/2027 |
 | Fator tarifário | (IRT projetado / IRT médio dos últimos 12 meses) ^ elasticidade |
+
+### Cenário El Niño (2027)
+
+O único El Niño da amostra (forte, jun/2023-mai/2024) serve de análogo:
++1,3 °C e chuva 5% abaixo da média no estado, com até +3 °C entre set/2023 e
+mai/2024. Para cada superintendência e mês do ano, a anomalia é a diferença
+entre o valor no evento e a média do mês no histórico (temperatura, aditiva) ou
+a razão (chuva, multiplicativa, limitada a 0,5-2). As anomalias são suavizadas
+em 3 meses, porque um único evento não se repete mês a mês, e aplicadas sobre
+o cenário base nos meses de `el_nino_periodo`. `el_nino_intensidade` escala o
+evento (0,5 = El Niño fraco).
+
+O efeito no volume passa pela temperatura e pela chuva dos modelos. O nível
+dos reservatórios segue a projeção do `auto.arima` em todos os cenários.
 
 ### Elasticidade e reajuste como parâmetros
 
@@ -82,7 +97,7 @@ Cuidados implementados:
 - **Sensibilidade.** As colunas `vol_eps_baixa` e `vol_eps_alta` aplicam
   0,5× e 1,5× a elasticidade.
 
-Saídas em `05_FRAMEWORK_4/04_PROJECAO/`: `Projecao_Volume_202712.xlsx` (premissas,
+Saídas em `05_FRAMEWORK_5/04_PROJECAO/`: `Projecao_Volume_202712.xlsx` (premissas,
 escolhas, totais anuais por segmento/categoria/superintendência, série mensal)
 e `graficos/`.
 

@@ -21,9 +21,9 @@ source("00_Funcoes.R", encoding = "UTF-8")
 
 # 0. PREMISSAS -----------------------------------------------------------------
 
-dir_bases = "05_FRAMEWORK_4/01_BASES"
-dir_bt    = "05_FRAMEWORK_4/03_BACKTESTING"
-dir_saida = "05_FRAMEWORK_4/04_PROJECAO"
+dir_bases = "05_FRAMEWORK_4/01_BASES"          # entrada
+dir_bt    = "05_FRAMEWORK_5/03_BACKTESTING"    # saída dos backtests (decisão)
+dir_saida = "05_FRAMEWORK_5/04_PROJECAO"
 
 segmentos = list(
   Residencial = list(
@@ -41,6 +41,12 @@ alvos = c("med_agua", "fat_agua", "med_esg", "fat_esg")
 fim_projecao   = as.Date("2027-12-01")
 min_obs_modelo = 36            # mínimo de meses para ajustar modelo (demais: fallback)
 min_obs_econ   = 24            # mínimo de meses para o ETS das economias
+
+# Economias: projetar o total das categorias do grupo e repartir pela
+# participação do último mês? No residencial há migração normal -> social
+# (tarifa social: 0,5 mi -> 1,4 mi de economias desde 2022) que, projetada
+# por categoria, inflaria o total. No não residencial as categorias são estáveis.
+economias_agrega_categorias = c(Residencial = TRUE, Nao_Residencial = FALSE)
 
 # Outliers: tsclean no consumo/economia em todo o histórico (que é o treino)
 tratar_outliers = TRUE
@@ -77,9 +83,21 @@ elasticidade_tarifa = c("Residencial Normal"            = -0.10,
 elasticidade_padrao = -0.10               # categorias fora da lista
 elasticidade_sens   = c(baixa = 0.5, alta = 1.5)   # multiplicadores (sensibilidade)
 
-# Cenários climáticos das exógenas (ver `cenarios_ex_ante`)
-cenarios_proj     = c("base", "quente_seco", "frio_umido")
-cenario_principal = "base"
+## Clima -----------------------------------------------------------------------
+# base        : média do mês no histórico, por série
+# el_nino     : base + anomalias do El Niño análogo nos meses de `el_nino_periodo`
+# quente_seco : base com temperatura +1 dp e chuva -1 dp
+# frio_umido  : base com temperatura -1 dp e chuva +1 dp
+cenarios_proj     = c("base", "el_nino", "quente_seco", "frio_umido")
+cenario_principal = "el_nino"
+
+# El Niño em 2027. Análogo: o El Niño forte de jun/2023-mai/2024, único da
+# amostra (+1,3 °C e chuva 5% abaixo da média no estado). As anomalias são por
+# superintendência e mês do ano, suavizadas em 3 meses.
+el_nino_analogo     = c(inicio = "2023-06-01", fim = "2024-05-01")
+el_nino_periodo     = c(inicio = "2027-01-01", fim = "2027-12-01")
+el_nino_intensidade = 1          # 1 = igual ao análogo; 0,5 = metade (El Niño fraco)
+el_nino_suavizacao  = 3          # meses da média móvel das anomalias (1 = sem)
 
 # Processamento (Windows/RStudio: multisession)
 n_workers = 20
@@ -202,7 +220,17 @@ projeta_alvo = function(seg, alvo, agrup, modelo, ajuste_elasticidade) {
     select(all_of(chaves_ts)) %>%
     crossing(periodo = periodos_proj)
 
-  cenarios = cenarios_ex_ante(base_ts, grade, fim_hist, glob_proj)[cenarios_proj]
+  cenarios = cenarios_ex_ante(base_ts, grade, fim_hist, glob_proj)
+
+  anomalias = anomalias_analogo(base_ts, el_nino_analogo[["inicio"]], el_nino_analogo[["fim"]],
+                                el_nino_suavizacao)
+
+  cenarios$el_nino = cenario_analogo(cenarios$base, anomalias,
+                                     periodos_proj[periodos_proj >= yearmonth(el_nino_periodo[["inicio"]]) &
+                                                     periodos_proj <= yearmonth(el_nino_periodo[["fim"]])],
+                                     el_nino_intensidade)
+
+  cenarios = cenarios[cenarios_proj]
 
   fc = prever(fit, map(cenarios, ~ semi_join(.x, eleg, by = chaves_ts))) %>%
     select(-.model)
@@ -211,7 +239,8 @@ projeta_alvo = function(seg, alvo, agrup, modelo, ajuste_elasticidade) {
 
   ## Economias -----------------------------------------------------------------
 
-  econ = projeta_economias(base_ts, ativas, periodos_proj, fim_hist, n_workers, min_obs_econ)
+  econ = projeta_economias(base_ts, ativas, periodos_proj, fim_hist, n_workers, min_obs_econ,
+                           agrega_categorias = economias_agrega_categorias[[seg]])
 
   ## Volume --------------------------------------------------------------------
 
@@ -260,7 +289,7 @@ projeta_alvo = function(seg, alvo, agrup, modelo, ajuste_elasticidade) {
   toc()
 
   list(proj = proj, real = real, encerradas = encerradas,
-       resumo_exog = resumo_exog, fit = fit)
+       resumo_exog = resumo_exog, anomalias = anomalias, fit = fit)
 }
 
 resultados = escolhas %>%
@@ -334,6 +363,15 @@ series = resultados %>%
 exog_cenarios = desaninha("resumo_exog") %>%
   mutate(periodo = as.Date(periodo))
 
+anomalias_el_nino = desaninha("anomalias") %>%
+  filter(segmento == "Residencial", alvo == "med_agua") %>%
+  select(-segmento, -alvo)
+
+anomalias_el_nino %>%
+  group_by(mes) %>%
+  summarise(temp_anom = mean(temp_anom), prec_razao = mean(prec_razao)) %>%
+  print(n = 12)
+
 premissas = tribble(
   ~premissa, ~valor,
   "Histórico até", as.character(fim_hist),
@@ -345,11 +383,16 @@ premissas = tribble(
   "IRT real - referência (média 12m)", number(irt_ref, 0.01),
   "Elasticidade-preço", paste(names(elasticidade_tarifa), elasticidade_tarifa, sep = ": ", collapse = " | "),
   "Sensibilidade da elasticidade", paste(names(elasticidade_sens), elasticidade_sens, sep = " x", collapse = " | "),
+  "Cenário principal", cenario_principal,
   "Clima (cenário base)", "média do mês no histórico, por série",
+  "Clima (el_nino)", glue("base + anomalias do análogo {el_nino_analogo[['inicio']]} a {el_nino_analogo[['fim']]} ",
+                          "entre {el_nino_periodo[['inicio']]} e {el_nino_periodo[['fim']]} ",
+                          "(intensidade {el_nino_intensidade}, suavização {el_nino_suavizacao} meses)"),
   "Clima (quente_seco / frio_umido)", "média ± 1 desvio-padrão do mês",
   "CAGED", "tendência dos últimos 12 meses",
   "Nível dos reservatórios", "auto.arima na série histórica",
   "Economias", glue("ETS amortecido no log (séries com {min_obs_econ}+ meses); demais: último valor"),
+  "Economias - total entre categorias", paste(names(economias_agrega_categorias), economias_agrega_categorias, sep = ": ", collapse = " | "),
   "Outliers", if (tratar_outliers) "tsclean no consumo/economia (histórico)" else "sem tratamento",
   "Séries curtas/sem modelo", "fallback: sazonal ingênuo -> média 12m -> segmento"
 )
@@ -398,7 +441,19 @@ graf_categoria = function(seg) {
     tema
 }
 
-graficos = c(list(premissas = g_premissas),
+g_exog = exog_cenarios %>%
+  filter(segmento == "Residencial", alvo == "med_agua") %>%
+  select(cenario, periodo, `Temperatura (°C)` = temp_med, `Chuva (mm/dia)` = prec_tot) %>%
+  pivot_longer(-c(cenario, periodo)) %>%
+  ggplot(aes(x = periodo, y = value, color = cenario)) +
+  geom_line(lwd = 1) +
+  facet_wrap(~name, scales = "free_y", ncol = 1) +
+  scale_color_manual("", values = cores_cenario) +
+  labs(title = "Clima projetado por cenário",
+       subtitle = "Média ponderada pelo volume (residencial)") +
+  tema
+
+graficos = c(list(premissas = g_premissas, clima = g_exog),
              set_names(map(names(segmentos), graf_total), paste0("total_", names(segmentos))),
              set_names(map(names(segmentos), graf_categoria), paste0("categoria_", names(segmentos))))
 
@@ -416,7 +471,8 @@ write_xlsx(
        anual_superintendencia = anual_superint,
        mensal = mensal,
        tarifa_e_nivel = glob_proj %>% mutate(periodo = as.Date(periodo)),
-       exogenas_cenarios = exog_cenarios),
+       exogenas_cenarios = exog_cenarios,
+       anomalias_el_nino = anomalias_el_nino),
   file.path(dir_saida, glue("Projecao_Volume_{format(fim_projecao, '%Y%m')}.xlsx")))
 
 toc()

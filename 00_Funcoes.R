@@ -53,7 +53,8 @@ tema = theme(axis.ticks = element_blank(),
 
 cores_cenario = c("Real" = "black", "Imputado" = "grey60", "LCA" = "#f68c1f",
                   "realizado" = "#003853", "base" = "#12d0ff",
-                  "quente_seco" = "#e4572e", "frio_umido" = "#76b041")
+                  "quente_seco" = "#e4572e", "frio_umido" = "#76b041",
+                  "el_nino" = "#9b5de5")
 
 # Alvos: volume e economias de cada conceito
 alvos_def = list(
@@ -393,6 +394,62 @@ cenarios_ex_ante = function(hist, grade, fim_hist, glob_proj) {
     map(~ select(.x, all_of(chaves_ts), periodo, all_of(regressoras)))
 }
 
+# Anomalias climáticas de um evento análogo (ex.: El Niño de jun/23-mai/24),
+# por superintendência e mês do ano, em relação à média do mês no histórico
+# (a mesma climatologia do cenário base):
+#   temp_anom  : diferença em °C (aditiva)
+#   prec_razao : razão da chuva (multiplicativa, limitada a [0,5; 2])
+# `suavizacao` = janela da média móvel circular entre meses do ano (1 = sem),
+# porque um único evento não repete o mesmo mês a mês.
+anomalias_analogo = function(base_ts, inicio, fim, suavizacao = 3) {
+
+  reg = base_ts %>%
+    as_tibble() %>%
+    group_by(cd_regiao_adj, periodo) %>%
+    summarise(temp = weighted.mean(temp_med, econ_ajust, na.rm = T),
+              prec = weighted.mean(prec_tot, econ_ajust, na.rm = T),
+              .groups = "drop") %>%
+    mutate(mes = month(periodo),
+           analogo = periodo >= yearmonth(inicio) & periodo <= yearmonth(fim))
+
+  clim = reg %>%
+    group_by(cd_regiao_adj, mes) %>%
+    summarise(temp_c = mean(temp), prec_c = mean(prec), .groups = "drop")
+
+  mm_circular = function(x, k) {
+    if (k <= 1) return(x)
+    n = length(x); h = (k - 1) %/% 2
+    map_dbl(seq_len(n), ~ mean(x[((.x - h):(.x + h) - 1) %% n + 1]))
+  }
+
+  reg %>%
+    filter(analogo) %>%
+    group_by(cd_regiao_adj, mes) %>%
+    summarise(temp = mean(temp), prec = mean(prec), .groups = "drop") %>%
+    left_join(clim, by = c("cd_regiao_adj", "mes")) %>%
+    complete(cd_regiao_adj, mes = 1:12) %>%
+    mutate(temp_anom = coalesce(temp - temp_c, 0),
+           prec_log = coalesce(log(prec/prec_c), 0)) %>%
+    group_by(cd_regiao_adj) %>%
+    arrange(mes, .by_group = TRUE) %>%
+    mutate(temp_anom = mm_circular(temp_anom, suavizacao),
+           prec_razao = exp(mm_circular(prec_log, suavizacao)) %>% pmin(2) %>% pmax(0.5)) %>%
+    ungroup() %>%
+    select(cd_regiao_adj, mes, temp_anom, prec_razao)
+}
+
+# Aplica as anomalias do análogo sobre um cenário (normalmente o base) nos
+# `periodos` indicados; fora deles o cenário fica igual ao de origem
+cenario_analogo = function(cenario, anomalias, periodos, intensidade = 1) {
+  cenario %>%
+    mutate(mes = month(periodo)) %>%
+    left_join(anomalias, by = c("cd_regiao_adj", "mes")) %>%
+    mutate(aplica = periodo %in% periodos,
+           temp_med = if_else(aplica, temp_med + intensidade * coalesce(temp_anom, 0), temp_med),
+           prec_tot = if_else(aplica, prec_tot * coalesce(prec_razao, 1)^intensidade, prec_tot)) %>%
+    select(all_of(names(cenario)))
+}
+
 resumo_cenarios = function(cenarios, pesos) {
   imap_dfr(cenarios, function(nd, nm) {
     nd %>%
@@ -553,30 +610,54 @@ backtest_agrupamento = function(base_chave, agrup, cfg, ctx) {
 }
 
 
-# Economias projetadas por série: ETS amortecido no log (séries com pelo menos
-# `min_obs` meses); nas demais, repete o último valor
-projeta_economias = function(base_ts, ativas, periodos, fim_hist, n_workers, min_obs = 24) {
+# Economias projetadas: ETS amortecido no log (séries com pelo menos `min_obs`
+# meses); nas demais, repete o último valor.
+# `agrega_categorias = TRUE` projeta o total das categorias de cada grupo e
+# reparte pela participação do último mês. Use quando há migração entre
+# categorias (ex.: residencial normal -> social), que o ETS por categoria
+# extrapolaria sem descontar a categoria de origem.
+projeta_economias = function(base_ts, ativas, periodos, fim_hist, n_workers,
+                             min_obs = 24, agrega_categorias = FALSE) {
+
+  k = if (agrega_categorias) setdiff(chaves_ts, "categoria_detalhe") else chaves_ts
 
   hist = base_ts %>%
     filter(periodo <= fim_hist) %>%
     semi_join(ativas, by = chaves_ts) %>%
+    as_tibble() %>%
     select(all_of(chaves_ts), periodo, econ = econ_ajust)
 
-  longas = hist %>%
+  # participação de cada série no total do nível k no último mês
+  part = hist %>%
+    filter(periodo == fim_hist) %>%
+    group_by(across(all_of(k))) %>%
+    mutate(part = econ/sum(econ)) %>%
+    ungroup() %>%
+    select(all_of(chaves_ts), part)
+
+  tot = hist %>%
+    group_by(across(all_of(k)), periodo) %>%
+    summarise(econ = sum(econ), .groups = "drop") %>%
+    as_tsibble(key = all_of(k), index = periodo) %>%
+    fill_gaps() %>%
+    group_by_key() %>%
+    mutate(econ = na.approx(econ, na.rm = FALSE, rule = 2)) %>%
+    ungroup()
+
+  longas = tot %>%
     as_tibble() %>%
-    count(across(all_of(chaves_ts))) %>%
+    count(across(all_of(k))) %>%
     filter(n >= min_obs)
 
-  fc = hist %>%
-    semi_join(longas, by = chaves_ts) %>%
+  fc = tot %>%
+    semi_join(longas, by = k) %>%
     ajusta_modelos(list(ets = ETS(log(econ) ~ error("A") + trend("Ad") + season("N"))),
                    n_workers) %>%
     fabletools::forecast(h = length(periodos)) %>%
     as_tibble() %>%
-    select(all_of(chaves_ts), periodo, econ_prev = .mean)
+    select(all_of(k), periodo, econ_tot = .mean)
 
   ult = hist %>%
-    as_tibble() %>%
     group_by(across(all_of(chaves_ts))) %>%
     slice_max(periodo, n = 1) %>%
     ungroup() %>%
@@ -585,11 +666,13 @@ projeta_economias = function(base_ts, ativas, periodos, fim_hist, n_workers, min
   ativas %>%
     select(all_of(chaves_ts)) %>%
     crossing(periodo = periodos) %>%
-    left_join(fc, by = c(chaves_ts, "periodo")) %>%
+    left_join(part, by = chaves_ts) %>%
+    left_join(fc, by = c(k, "periodo")) %>%
     left_join(ult, by = chaves_ts) %>%
-    mutate(econ_metodo = if_else(is.finite(econ_prev), "ets_amortecido", "ultimo_valor"),
+    mutate(econ_prev = econ_tot * part,
+           econ_metodo = if_else(is.finite(econ_prev), "ets_amortecido", "ultimo_valor"),
            n_economias = if_else(is.finite(econ_prev), econ_prev, econ_ult)) %>%
-    select(-econ_prev, -econ_ult)
+    select(all_of(chaves_ts), periodo, n_economias, econ_metodo)
 }
 
 

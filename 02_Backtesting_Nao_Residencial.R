@@ -22,7 +22,7 @@ cfg = list(
   segmento   = "Não Residencial",
   arq_base   = "05_FRAMEWORK_4/01_BASES/02_Base Analítica Ajustada_202201-202608_Não Residencial.csv",
   categorias = c("Comercial", "Industrial", "Pública"),
-  dir_saida  = "05_FRAMEWORK_4/03_BACKTESTING/Nao_Residencial",
+  dir_saida  = "05_FRAMEWORK_5/03_BACKTESTING/Nao_Residencial",
 
   # Alvos (definidos em `alvos_def`): med_agua | fat_agua | med_esg | fat_esg
   alvos = c("med_agua", "fat_agua", "med_esg", "fat_esg"),
