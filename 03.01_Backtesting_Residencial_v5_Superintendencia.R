@@ -45,7 +45,7 @@ tema = theme(axis.ticks = element_blank(),
 # 0. PARÂMETROS ----------------------------------------------------------------
 
 arq_base  = "05_FRAMEWORK_4/01_BASES/02_Base Analítica Ajustada_202201-202608_Residencial.csv"
-arq_lca   = "05_FRAMEWORK_4/01_BASES/compilado_LCA.xlsx"   # .xlsx ou .csv
+arq_lca   = "05_FRAMEWORK_4/01_BASES/compilado_LCA.csv"   # .xlsx ou .csv
 dir_saida = "05_FRAMEWORK_4/03_BACKTESTING"
 
 # Variável de interesse (trocar para esgoto / faturado nos próximos testes)
@@ -65,7 +65,7 @@ alvo_real = "ajustado"
 limpar_economias = FALSE
 
 # Agrupamentos a testar (nomes de `regras_agrupamento`, seção 3.0)
-agrupamentos = c("G1_original", "G2_superintendencia", "G3_municipio", "G4_abc_regiao")
+agrupamentos = c("G1_original", "G2_superintendencia", "G3_municipio")
 
 # Tarifa nos cenários ex-ante: "realizada" (reajuste conhecido/regulado)
 # ou "constante" (último valor real do treino)
@@ -223,11 +223,7 @@ regras_agrupamento = list(
   # Uma série por município (SP/Osasco/Guarulhos por ATC)
   G3_municipio = quo(if_else(municipio %in% mun_atc,
                              paste0(municipio, "_", cd_atc),
-                             municipio)),
-  # Como G1, mas B e C viram clusters separados dentro da regional
-  G4_abc_regiao = quo(case_when(municipio %in% mun_atc ~ paste0(municipio, "_", cd_atc),
-                                classificacao_abc == "A" ~ municipio,
-                                T ~ paste0("cluster_", cd_regiao, "_", classificacao_abc)))
+                             municipio))
 )
 
 chaves_ts = c("cd_regiao_adj", "grupo", "categoria_detalhe", "recorte")
@@ -575,8 +571,6 @@ g_cenarios_exog
 # detectado pelas colunas presentes no arquivo (ex.: categoria_detalhe,
 # recorte, cd_regiao_adj, cd_regiao, municipio). Volume LCA = consumo LCA x
 # economias reais, igual aos modelos.
-lca_col_periodo = "periodo"
-lca_col_consumo = "consumo"
 lca_chaves_possiveis = c("cd_regiao_adj", "cd_regiao", "municipio", "categoria_detalhe", "recorte")
 
 carrega_lca = function(arq) {
@@ -586,13 +580,9 @@ carrega_lca = function(arq) {
     return(NULL)
   }
 
-  lca = if (str_detect(arq, "\\.xlsx?$")) read_excel(arq) else fread(arq, encoding = "UTF-8")
-
-  lca = lca %>%
-    as_tibble() %>%
-    rename(periodo = all_of(lca_col_periodo), consumo_lca = all_of(lca_col_consumo))
-
-  if ("categoria" %in% names(lca)) lca = filter(lca, categoria == "Residencial")
+  lca = arq %>%
+    fread() %>%
+    mutate(consumo_lca = vol_med/n_economias)
 
   # periodo: Date, POSIXct, "AAAA-MM-DD" ou AAAAMM
   lca$periodo = if (is.numeric(lca$periodo) && all(lca$periodo > 190000, na.rm = T)) {
@@ -607,6 +597,7 @@ carrega_lca = function(arq) {
 }
 
 lca = carrega_lca(arq_lca)
+
 lca_chaves = attr(lca, "chaves")
 
 if (!is.null(lca)) {
@@ -757,12 +748,15 @@ g_real_fc = ggplot(data = NULL, aes(x = periodo, y = vol_med)) +
   {if (!is.null(lca_x_real))
     geom_line(data = fc_total %>% filter(cenario == cenario_selecao, agrupamento == "LCA") %>%
                 select(-.model),
-              aes(linetype = "LCA"), color = "grey40", lwd = 0.8)} +
+              aes(linetype = "LCA"), color = "#f68c1f", lwd = 0.8)} +
   facet_wrap(~.model, nrow = 2) +
+  # uma cor por agrupamento (acrescente cores se incluir novas regras)
+  scale_color_manual(values = c("#12d0ff", "#003853", "#76b041")) +
   labs(title = "Volume medido (milhões m³) - real x forecast",
        subtitle = glue("Cenário: {cenario_selecao} | Corte: {format(periodo_corte, '%m/%Y')}"),
        linetype = "") +
   tema
+
 
 g_real_fc
 
