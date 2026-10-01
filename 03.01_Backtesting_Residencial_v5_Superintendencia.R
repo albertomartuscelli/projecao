@@ -851,7 +851,9 @@ coeficientes = imap_dfr(res, function(r, agrup) {
   mutate(elasticidade = case_when(em_log ~ estimate,
                                   term == "tarifa" ~ estimate * tarifa_med,
                                   term == "lag_nv_sim" ~ estimate * lag_nv_med),
-         sig = factor(if_else(p.value <= 0.05, "Significante", "Não Significante")),
+         # p-valor NA quando a matriz de covariância do ARIMA não é positiva
+         # definida (aviso "NaNs produced" no fit): tratado como não significante
+         sig = factor(if_else(coalesce(p.value <= 0.05, FALSE), "Significante", "Não Significante")),
          sinal_ok = sign(estimate) == sinal_esperado) %>%
   group_by(agrupamento, .model, term) %>%
   mutate(outlier = flag_iqr(elasticidade)) %>%
