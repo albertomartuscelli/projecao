@@ -27,8 +27,10 @@ cfg = list(
   categorias = "Residencial",
   dir_saida  = "05_FRAMEWORK_5/03_BACKTESTING/Residencial",
 
-  # Alvos (definidos em `alvos_def`): med_agua | fat_agua | med_esg | fat_esg
-  alvos = c("med_agua", "fat_agua", "med_esg", "fat_esg"),
+  # Alvos (definidos em `alvos_def`): med_agua | fat_agua | med_esg | fat_esg.
+  # Só os medidos por desempenho; na projeção, o faturado usa a escolha do
+  # medido do mesmo serviço.
+  alvos = c("med_agua", "med_esg"),
 
   # Janela de backtest
   periodo_corte  = as.Date("2026-01-01"),   # 1º mês de teste
@@ -47,7 +49,8 @@ cfg = list(
   alvo_real        = "bruto",               # bruto | ajustado
 
   # Agrupamentos a testar (nomes de `regras_agrupamento`)
-  agrupamentos = c("G1_municipioA_clusterBC", "G2_superintendencia", "G3_municipio"),
+  # G3_municipio fica fora por desempenho (empatou com G1 a 4x o custo)
+  agrupamentos = c("G1_municipioA_clusterBC", "G2_superintendencia"),
 
   # Tarifa nos cenários ex-ante: realizada (reajuste conhecido) | constante
   tarifa_ex_ante = "realizada",

@@ -214,11 +214,20 @@ le_decisao = function(seg) {
     message(glue("Decisão não encontrada ({arq}) - usando padrão para {seg}."))
     tibble(alvo = character(), agrupamento = character(), modelo = character())
   }
+  # Alvo sem backtest (ex.: faturado) usa a escolha do medido do mesmo serviço
+  medido = c(fat_agua = "med_agua", fat_esg = "med_esg")
+
   tibble(segmento = seg, alvo = alvos) %>%
     left_join(dec, by = "alvo") %>%
-    mutate(fonte = if_else(is.na(modelo), "padrão", "backtest"),
-           agrupamento = coalesce(agrupamento, escolha_padrao$agrupamento),
-           modelo = coalesce(modelo, escolha_padrao$modelo))
+    mutate(alvo_ref = coalesce(unname(medido[alvo]), alvo)) %>%
+    left_join(dec %>% rename(alvo_ref = alvo, agrup_ref = agrupamento, modelo_ref = modelo),
+              by = "alvo_ref") %>%
+    mutate(fonte = case_when(!is.na(modelo) ~ "backtest",
+                             !is.na(modelo_ref) ~ glue("backtest ({alvo_ref})"),
+                             T ~ "padrão"),
+           agrupamento = coalesce(agrupamento, agrup_ref, escolha_padrao$agrupamento),
+           modelo = coalesce(modelo, modelo_ref, escolha_padrao$modelo)) %>%
+    select(segmento, alvo, agrupamento, modelo, fonte)
 }
 
 escolhas = map_dfr(names(segmentos), le_decisao) %>%
