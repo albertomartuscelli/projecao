@@ -51,6 +51,7 @@ cfg = list(
   nivel_selecao   = "superintendencia",     # nome em `niveis`
   metrica_selecao = "WAPE",                 # MAPE | WAPE | sMAPE | RMSE | MAE
   cenario_selecao = "base",                 # realizado | base | quente_seco | frio_umido
+  tolerancia_selecao = 0.05,                # p.p.: empate técnico -> agregação com menos séries
   n_melhores      = 5,
 
   # Níveis de acurácia

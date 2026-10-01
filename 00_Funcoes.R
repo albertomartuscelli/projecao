@@ -1001,9 +1001,20 @@ executa_backtest = function(base, alvo, cfg) {
                        MAPE_total = MAPE, WAPE_total = WAPE, Vies_total = Vies),
               by = c("agrupamento", "cenario", ".model"))
 
+  # Escolha: entre as combinações a até `tolerancia_selecao` p.p. da melhor,
+  # fica a agregação com menos séries (mais barata de rodar e de manter)
+  tol = cfg$tolerancia_selecao %||% 0
+
   melhor = ranking %>%
     filter(agrupamento != "LCA") %>%
+    filter(.data[[cfg$metrica_selecao]] <= min(.data[[cfg$metrica_selecao]]) + tol) %>%
+    left_join(series %>% select(agrupamento, n_series), by = "agrupamento") %>%
+    arrange(n_series, .data[[cfg$metrica_selecao]]) %>%
     slice(1)
+
+  ranking = ranking %>%
+    mutate(escolhido = agrupamento == melhor$agrupamento & .model == melhor$.model,
+           .after = .model)
 
   tab_modelos = tabela_modelos(acc_sel, cfg$metrica_selecao)
   tab_agregacao = tabela_agregacao(acc_sel, cfg$metrica_selecao, series)
@@ -1017,6 +1028,8 @@ executa_backtest = function(base, alvo, cfg) {
               cenario = cfg$cenario_selecao,
               metrica = cfg$metrica_selecao,
               valor = .data[[cfg$metrica_selecao]],
+              valor_melhor_absoluto = min(ranking[[cfg$metrica_selecao]][ranking$agrupamento != "LCA"]),
+              tolerancia = tol,
               MAPE_total, WAPE_total, Vies_total)
 
   message(glue("Melhor: {melhor$agrupamento} / {melhor$.model} ",
