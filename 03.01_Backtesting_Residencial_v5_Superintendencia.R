@@ -18,7 +18,7 @@
 # =============================================================================
 
 pacman::p_load(tidyverse, data.table, readxl, writexl, glue, zoo,
-               tsibble, fable, fabletools, forecast, scales,
+               tsibble, fable, fabletools, feasts, forecast, scales,
                future, future.apply, tictoc)
 
 tema = theme(axis.ticks = element_blank(),
@@ -60,6 +60,10 @@ min_obs_treino = 36                      # mínimo de meses de treino p/ ajustar
 # Real usado como referência na acurácia: "ajustado" (pós-tsclean) ou "bruto"
 alvo_real = "ajustado"
 
+# tsclean nas economias? Saltos de economias costumam ser reais (novas
+# ligações, recadastramento), por isso o padrão limpa só o consumo/economia
+limpar_economias = FALSE
+
 # Agrupamentos a testar (nomes de `regras_agrupamento`, seção 3.0)
 agrupamentos = c("G1_original", "G2_superintendencia", "G3_municipio", "G4_abc_regiao")
 
@@ -71,6 +75,7 @@ tarifa_ex_ante = "realizada"
 nivel_selecao   = "superintendencia"   # total | superintendencia | categoria | recorte | superint_cat_rec
 metrica_selecao = "WAPE"               # MAPE | WAPE | sMAPE | RMSE | MAE
 cenario_selecao = "base"               # realizado | base | quente_seco | frio_umido
+n_melhores      = 5                    # nº de modelos detalhados na seção 3.6
 
 # Processamento (Windows/RStudio: multisession; multicore não funciona)
 n_workers        = 20
@@ -159,7 +164,7 @@ base_chave = base_res %>%
   arrange(periodo, .by_group = TRUE) %>%
   mutate(preenchido = is.na(econ),
          consumo = vol/econ,
-         econ_ajust = limpa_serie(econ),
+         econ_ajust = if (limpar_economias) limpa_serie(econ) else econ,
          consumo_ajust = limpa_serie(consumo)) %>%
   ungroup() %>%
   # buracos internos servem só para o tsclean; não viram volume
@@ -439,12 +444,13 @@ for (agrup in agrupamentos) {
   if (reaproveitar_fit & file.exists(arq_fit)) {
     fit_model = readRDS(arq_fit)
   } else {
+    # multisession só no fit: no forecast a cópia dos modelos p/ os workers
+    # custa mais que o cálculo. tryCatch garante a volta ao sequential.
     plan(multisession, workers = n_workers)
     tic("Fit")
-    fit_model = train %>%
-      model(!!!modelos)
+    fit_model = tryCatch(train %>% model(!!!modelos),
+                         finally = plan(sequential))
     toc()
-    plan(sequential)
     saveRDS(fit_model, arq_fit)
   }
 
@@ -546,7 +552,6 @@ cenarios_exog = imap_dfr(res, function(r, agrup) {
 g_cenarios_exog = cenarios_exog %>%
   filter(agrupamento == agrupamentos[1]) %>%
   pivot_longer(temp_med:tarifa) %>%
-  mutate(caged = NULL) %>%
   ggplot(aes(x = periodo, y = value, color = cenario)) +
   geom_line(lwd = 1) +
   facet_wrap(~name, scales = "free_y") +
@@ -582,11 +587,12 @@ carrega_lca = function(arq) {
   if ("categoria" %in% names(lca)) lca = filter(lca, categoria == "Residencial")
 
   # periodo: Date, POSIXct, "AAAA-MM-DD" ou AAAAMM
-  lca = lca %>%
-    mutate(periodo = case_when(
-      is.numeric(periodo) & periodo > 190000 ~ as.Date(paste0(periodo, "01"), "%Y%m%d"),
-      T ~ as.Date(periodo)),
-      periodo = yearmonth(periodo))
+  lca$periodo = if (is.numeric(lca$periodo) && all(lca$periodo > 190000, na.rm = T)) {
+    as.Date(paste0(lca$periodo, "01"), "%Y%m%d")
+  } else {
+    as.Date(lca$periodo)
+  }
+  lca$periodo = yearmonth(lca$periodo)
 
   attr(lca, "chaves") = intersect(lca_chaves_possiveis, names(lca))
   lca
@@ -634,10 +640,10 @@ if (!is.null(lca)) {
 
 ### Real x Forecast ------------------------------------------------------------
 
-real_hist = map_dfr(res, ~ .x$base_ts %>%
-                      as_tibble() %>%
-                      filter(!preenchido), .id = "agrupamento") %>%
-  filter(agrupamento == agrupamentos[1]) %>%
+# O real é o mesmo em qualquer agrupamento
+real_hist = res[[1]]$base_ts %>%
+  as_tibble() %>%
+  filter(!preenchido) %>%
   mutate(vol_med = if (alvo_real == "ajustado") vol_ajust else vol_bruto,
          n_economias = if (alvo_real == "ajustado") econ_ajust else econ_bruto) %>%
   select(cd_regiao_adj, categoria_detalhe, recorte, periodo, vol_med, n_economias)
@@ -945,11 +951,115 @@ graf_elast_niveis = map(c("categoria", "recorte", "superintendencia"), graf_elas
 graf_elast_niveis
 
 
+## 3.6 Estatísticas dos melhores modelos --------------------------------------
+
+melhores = ranking %>%
+  filter(agrupamento != "LCA") %>%
+  slice_head(n = n_melhores) %>%
+  select(rank, agrupamento, .model)
+
+# Diagnóstico por série: especificação, AICc, desvio-padrão residual (em log
+# ~ erro % no ajuste) e Ljung-Box (24 lags) nas inovações
+diag_series = function(agrup, mod) {
+
+  fit = res[[agrup]]$fit_model %>%
+    select(all_of(chaves_ts), all_of(mod))
+
+  espec = fit %>%
+    as_tibble() %>%
+    transmute(across(all_of(chaves_ts)),
+              espec = str_remove_all(format(.data[[mod]]), "^<|>$"))
+
+  n_arma = fit %>%
+    coef() %>%
+    filter(str_detect(term, "^s?(ar|ma)\\d")) %>%
+    count(across(all_of(chaves_ts)), name = "dof")
+
+  ljung = fit %>%
+    augment() %>%
+    as_tibble() %>%
+    group_by(across(all_of(chaves_ts))) %>%
+    summarise(innov = list(.innov), .groups = "drop") %>%
+    left_join(n_arma, by = chaves_ts) %>%
+    mutate(dof = coalesce(dof, 0L),
+           lb_pvalor = map2_dbl(innov, dof, ~ tryCatch(
+             Box.test(na.omit(.x), lag = 24, type = "Ljung-Box", fitdf = .y)$p.value,
+             error = function(e) NA_real_))) %>%
+    select(-innov)
+
+  acc_serie = fit_x_real %>%
+    filter(agrupamento == agrup, .model == mod, cenario == cenario_selecao) %>%
+    group_by(across(all_of(chaves_ts))) %>%
+    summarise(WAPE = sum(abs(vol_med_fit - vol_med_real))/sum(vol_med_real) * 100,
+              Vies = sum(vol_med_fit - vol_med_real)/sum(vol_med_real) * 100,
+              vol_teste = sum(vol_med_real),
+              .groups = "drop")
+
+  fit %>%
+    glance() %>%
+    select(all_of(chaves_ts), any_of(c("sigma2", "AICc"))) %>%
+    left_join(espec, by = chaves_ts) %>%
+    left_join(ljung, by = chaves_ts) %>%
+    left_join(acc_serie, by = chaves_ts) %>%
+    mutate(agrupamento = agrup, .model = mod, .before = 1)
+}
+
+estat_series = map2_dfr(melhores$agrupamento, melhores$.model, diag_series) %>%
+  # SNAIVE não tem AICc
+  mutate(AICc = if ("AICc" %in% names(.)) AICc else NA_real_)
+
+estat_melhores = estat_series %>%
+  group_by(agrupamento, .model) %>%
+  summarise(n_series = n(),
+            perc_null_model = mean(espec == "NULL model"),
+            perc_diferenciada = mean(str_detect(espec, "ARIMA\\(\\d,[1-9]")),
+            perc_sazonal = mean(str_detect(espec, "\\)\\(")),
+            AICc_mediano = median(AICc, na.rm = T),
+            sd_residual_mediano = median(sqrt(sigma2), na.rm = T),
+            perc_ljung_box_ok = mean(lb_pvalor > 0.05, na.rm = T),
+            WAPE_serie_mediano = median(WAPE, na.rm = T),
+            WAPE_serie_p90 = quantile(WAPE, 0.9, na.rm = T),
+            especificacoes_comuns = names(sort(table(espec), decreasing = T))[1:3] %>%
+              na.omit() %>%
+              paste(collapse = " | "),
+            .groups = "drop") %>%
+  left_join(resumo_fallback %>%
+              filter(fallback != "modelo") %>%
+              group_by(agrupamento, .model) %>%
+              summarise(perc_vol_fallback = sum(perc_vol), .groups = "drop"),
+            by = c("agrupamento", ".model")) %>%
+  mutate(perc_vol_fallback = coalesce(perc_vol_fallback, 0)) %>%
+  right_join(melhores, by = c("agrupamento", ".model")) %>%
+  relocate(rank) %>%
+  arrange(rank)
+
+# Acurácia dos melhores em todos os níveis e cenários
+estat_melhores_acc = imap_dfr(acc, ~ mutate(.x, nivel = .y, .before = 1)) %>%
+  inner_join(melhores, by = c("agrupamento", ".model")) %>%
+  relocate(rank) %>%
+  arrange(rank, nivel, cenario)
+
+# Coeficientes dos melhores (elasticidade geral)
+estat_melhores_coef = elasticidades$geral %>%
+  inner_join(melhores, by = c("agrupamento", ".model")) %>%
+  relocate(rank) %>%
+  arrange(rank, var)
+
+estat_melhores %>%
+  select(rank:.model, n_series, perc_ljung_box_ok, sd_residual_mediano,
+         WAPE_serie_mediano, perc_vol_fallback) %>%
+  print()
+
+
 # 4. EXPORTAÇÃO ----------------------------------------------------------------
 
 write_xlsx(
   c(list(ranking = ranking,
-         mape_total_wide = acc_bu),
+         mape_total_wide = acc_bu,
+         melhores_resumo = estat_melhores,
+         melhores_acuracia = estat_melhores_acc,
+         melhores_elasticidade = estat_melhores_coef,
+         melhores_series = estat_series),
     set_names(acc, paste0("acc_", names(acc))),
     list(acc_detalhe_superint = acc_detalhe_superint,
          series = resumo_series,
