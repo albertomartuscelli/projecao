@@ -46,11 +46,12 @@ min_obs_modelo = 36            # mínimo de meses para ajustar modelo (demais: f
 min_obs_econ   = 24            # mínimo de meses para o ETS das economias
 max_meses_imputacao = 3        # buraco de série no histórico imputado até N meses
 
-# Economias: projetar o total das categorias do grupo e repartir pela
-# participação do último mês? No residencial há migração normal -> social
-# (tarifa social: 0,5 mi -> 1,4 mi de economias desde 2022) que, projetada
-# por categoria, inflaria o total. No não residencial as categorias são estáveis.
-economias_agrega_categorias = c(Residencial = TRUE, Nao_Residencial = FALSE)
+# Economias: ETS no total de cada nível, repartido entre as chaves pela
+# participação do último mês. No residencial o nível soma as categorias, porque
+# há migração normal -> social (tarifa social: 0,5 mi -> 1,4 mi de economias
+# desde 2022) que, projetada por categoria, inflaria o total.
+nivel_economias = list(Residencial     = c("cd_regiao_adj", "recorte"),
+                       Nao_Residencial = c("cd_regiao_adj", "categoria_detalhe"))
 
 ## Premissa de novas economias (engenharia) -------------------------------------
 # Planilha "ALAVANCA DE VOLUME - NOVAS ECONOMIAS": entregas mensais de 2027 por
@@ -92,9 +93,9 @@ tratar_outliers = TRUE
 escolha_padrao = list(agrupamento = "G1_municipioA_clusterBC", modelo = "arima_2")
 
 # Sobrepõe a decisão do backtest, se preenchido. Exemplo:
-#   add_row(segmento = "Nao_Residencial", alvo = "med_esg",
-#           agrupamento = "G2_superintendencia", modelo = "arima_1")
-escolha_manual = tibble(segmento = character(), alvo = character(),
+#   add_row(segmento = "Nao_Residencial", alvo = "med_esg", categoria_detalhe = "Industrial",
+#           agrupamento = "G2_superintendencia", modelo = "arima_5")
+escolha_manual = tibble(segmento = character(), alvo = character(), categoria_detalhe = character(),
                         agrupamento = character(), modelo = character())
 
 ## Tarifa ----------------------------------------------------------------------
@@ -207,34 +208,45 @@ g_premissas
 
 # 2. ESCOLHA DE AGREGAÇÃO E MODELO ---------------------------------------------
 
+# Decisão por segmento x alvo x categoria. Arquivo de decisão sem a coluna
+# categoria_detalhe (formato antigo) vale para todas as categorias.
 le_decisao = function(seg) {
+  categorias = sort(unique(bases[[seg]]$categoria_detalhe))
   arq = segmentos[[seg]]$arq_decisao
+
   dec = if (file.exists(arq)) {
-    read_excel(arq, "decisao") %>% select(alvo, agrupamento, modelo)
+    read_excel(arq, "decisao")
   } else {
     message(glue("Decisão não encontrada ({arq}) - usando padrão para {seg}."))
     tibble(alvo = character(), agrupamento = character(), modelo = character())
   }
+  if (!"categoria_detalhe" %in% names(dec)) dec = crossing(dec, categoria_detalhe = categorias)
+  dec = dec %>% select(alvo, categoria_detalhe, agrupamento, modelo)
+
   # Alvo sem backtest (ex.: faturado) usa a escolha do medido do mesmo serviço
   medido = c(fat_agua = "med_agua", fat_esg = "med_esg")
 
-  tibble(segmento = seg, alvo = alvos) %>%
-    left_join(dec, by = "alvo") %>%
+  crossing(segmento = seg, alvo = alvos, categoria_detalhe = categorias) %>%
+    left_join(dec, by = c("alvo", "categoria_detalhe")) %>%
     mutate(alvo_ref = coalesce(unname(medido[alvo]), alvo)) %>%
     left_join(dec %>% rename(alvo_ref = alvo, agrup_ref = agrupamento, modelo_ref = modelo),
-              by = "alvo_ref") %>%
+              by = c("alvo_ref", "categoria_detalhe")) %>%
     mutate(fonte = case_when(!is.na(modelo) ~ "backtest",
-                             !is.na(modelo_ref) ~ glue("backtest ({alvo_ref})"),
+                             !is.na(modelo_ref) ~ paste0("backtest (", alvo_ref, ")"),
                              T ~ "padrão"),
            agrupamento = coalesce(agrupamento, agrup_ref, escolha_padrao$agrupamento),
            modelo = coalesce(modelo, modelo_ref, escolha_padrao$modelo)) %>%
-    select(segmento, alvo, agrupamento, modelo, fonte)
+    select(segmento, alvo, categoria_detalhe, agrupamento, modelo, fonte)
 }
 
 escolhas = map_dfr(names(segmentos), le_decisao) %>%
   rows_update(escolha_manual %>% mutate(fonte = "manual"),
-              by = c("segmento", "alvo"), unmatched = "ignore") %>%
-  mutate(ajuste_elasticidade = !modelo %in% modelos_com_tarifa)
+              by = c("segmento", "alvo", "categoria_detalhe"), unmatched = "ignore") %>%
+  mutate(tipo_modelo = if_else(modelo %in% modelos_volume, "volume", "consumo/economia"),
+         ajuste_elasticidade = !modelo %in% modelos_com_tarifa)
+
+stopifnot(all(escolhas$modelo %in% names(modelos_catalogo)),
+          all(escolhas$agrupamento %in% names(regras_agrupamento)))
 
 escolhas %>%
   print(n = Inf)
@@ -242,20 +254,18 @@ escolhas %>%
 
 # 3. PROJEÇÃO POR SEGMENTO X ALVO ----------------------------------------------
 
-projeta_alvo = function(seg, alvo, agrup, modelo, ajuste_elasticidade) {
+# Projeção de uma categoria (consumo/economia ou volume direto)
+projeta_categoria = function(seg, alvo, cat, agrup, modelo, ajuste_elasticidade,
+                             base_chave, econ_chave, mun_exog) {
 
-  rotulo = glue("{seg} | {alvo} | {agrup} / {modelo}")
+  rotulo = glue("{seg} | {alvo} | {cat} | {agrup} / {modelo}")
   message(glue("\n===== {rotulo} ====="))
   tic(rotulo)
 
-  base = bases[[seg]]
+  regra = regras_agrupamento[[agrup]]
+  bc = base_chave %>% filter(categoria_detalhe == cat)
 
-  ## Séries --------------------------------------------------------------------
-
-  base_chave = prepara_chave(base, alvo, as.Date(fim_hist), tratar_outliers)
-
-  base_ts = monta_base_ts(base_chave, regras_agrupamento[[agrup]],
-                          exog_municipal(base), glob_exog)
+  base_ts = monta_base_ts(bc, regra, mun_exog, glob_exog)
 
   info = resumo_series(base_ts, fim_hist, min_obs_modelo)
   ativas = info %>% filter(ativa)
@@ -263,13 +273,13 @@ projeta_alvo = function(seg, alvo, agrup, modelo, ajuste_elasticidade) {
 
   message(glue("Séries: {nrow(info)} | ativas: {nrow(ativas)} | com modelo: {nrow(eleg)}"))
 
-  ## Consumo/economia ----------------------------------------------------------
+  ## Modelo --------------------------------------------------------------------
 
   hist = base_ts %>%
     filter(periodo <= fim_hist) %>%
     semi_join(eleg, by = chaves_ts)
 
-  fit = ajusta_modelos(hist, modelos_candidatos[modelo], n_workers)
+  fit = ajusta_catalogo(hist, modelo, n_workers)
 
   grade = ativas %>%
     select(all_of(chaves_ts)) %>%
@@ -292,57 +302,40 @@ projeta_alvo = function(seg, alvo, agrup, modelo, ajuste_elasticidade) {
 
   fallback = monta_fallback(base_ts, grade, fim_hist)
 
-  ## Economias -----------------------------------------------------------------
-
-  econ = projeta_economias(base_ts, ativas, periodos_proj, fim_hist, n_workers, min_obs_econ,
-                           agrega_categorias = economias_agrega_categorias[[seg]]) %>%
-    mutate(n_economias_ets = n_economias)
-
-  premissa_resumo = NULL
-
-  if (!is.null(premissa_economias) && seg %in% premissa_economias_segmentos) {
-
-    alocacao = aloca_premissa_economias(premissa_economias, base_chave, alvo,
-                                        de_para_utilizacao, fim_hist, cobertura_premissa)
-
-    econ = aplica_premissa_economias(econ %>% select(-n_economias_ets), alocacao, base_chave,
-                                     regras_agrupamento[[agrup]], fim_hist, economias_fora_premissa)
-
-    premissa_resumo = alocacao$alocado %>%
-      inner_join(base_chave %>% distinct(chave, cd_regiao_adj, categoria_detalhe, recorte), by = "chave") %>%
-      group_by(cd_regiao_adj, categoria_detalhe, recorte, periodo, regra) %>%
-      summarise(incremento = sum(incremento), .groups = "drop")
-
-    message(glue("Premissa de economias: {number(alocacao$total, big.mark = '.')} no total | ",
-                 "não alocado: {number(alocacao$nao_alocado, big.mark = '.')}"))
-  }
+  econ = economias_series(econ_chave, bc, regra, fim_hist)
 
   ## Volume --------------------------------------------------------------------
+
+  eh_volume = modelo %in% modelos_volume
 
   proj = grade %>%
     crossing(cenario = cenarios_proj) %>%
     left_join(fc, by = c(chaves_ts, "periodo", "cenario")) %>%
     left_join(fallback, by = c(chaves_ts, "periodo")) %>%
     left_join(info %>% select(all_of(chaves_ts), elegivel), by = chaves_ts) %>%
-    mutate(fallback = case_when(!elegivel ~ "nao_elegivel",
-                                !is.finite(consumo_prev) ~ "falha_modelo",
-                                T ~ "modelo"),
-           consumo_modelo = if_else(fallback == "modelo", consumo_prev, consumo_fb)) %>%
     left_join(econ, by = c(chaves_ts, "periodo")) %>%
     left_join(irt_proj, by = "periodo") %>%
-    mutate(eps = unname(coalesce(elasticidade_tarifa[categoria_detalhe], elasticidade_padrao)) *
+    mutate(fallback = case_when(!elegivel ~ "nao_elegivel",
+                                !is.finite(prev) ~ "falha_modelo",
+                                T ~ "modelo"),
+           # volume direto: consumo/economia = volume previsto / economias
+           consumo_modelo = case_when(fallback != "modelo" ~ consumo_fb,
+                                      eh_volume ~ prev/n_economias,
+                                      T ~ prev),
+           eps = unname(coalesce(elasticidade_tarifa[categoria_detalhe], elasticidade_padrao)) *
              ajuste_elasticidade,
            fator_tarifa = (tarifa/irt_ref)^eps,
            consumo = consumo_modelo * fator_tarifa,
            vol = consumo * n_economias,
            vol_eps_baixa = consumo_modelo * (tarifa/irt_ref)^(eps * elasticidade_sens[["baixa"]]) * n_economias,
            vol_eps_alta  = consumo_modelo * (tarifa/irt_ref)^(eps * elasticidade_sens[["alta"]]) * n_economias,
-           vol_econ_ets  = consumo * n_economias_ets,
+           # no volume direto as economias não mudam o volume
+           vol_econ_ets  = if (eh_volume) vol else consumo * n_economias_ets,
            tipo = "PROJ") %>%
     select(all_of(chaves_ts), periodo, tipo, cenario, n_economias, n_economias_ets, consumo_modelo,
            fator_tarifa, consumo, vol, vol_eps_baixa, vol_eps_alta, vol_econ_ets, fallback, econ_metodo)
 
-  ## Histórico (real; meses sem dado viram "IMPUTADO") -------------------------
+  ## Histórico ------------------------------------------------------------------
 
   # Buraco de série (todas as chaves sem dado no mês): só buracos de até
   # `max_meses_imputacao` meses viram volume IMPUTADO (consumo x economias
@@ -363,9 +356,9 @@ projeta_alvo = function(seg, alvo, agrup, modelo, ajuste_elasticidade) {
               vol = if_else(preenchido, consumo * econ_ajust, vol_bruto),
               consumo = vol/n_economias)
 
-  # Peso das séries encerradas antes do fim do histórico (não projetadas)
-  encerradas = info %>%
-    summarise(n_encerradas = sum(!ativa),
+  series = info %>%
+    summarise(n_series = n(),
+              n_encerradas = sum(!ativa),
               perc_vol12m_encerradas = sum(vol_12m[!ativa])/sum(vol_12m),
               n_fallback = sum(ativa & !elegivel),
               perc_vol12m_fallback = sum(vol_12m[ativa & !elegivel])/sum(vol_12m))
@@ -374,16 +367,65 @@ projeta_alvo = function(seg, alvo, agrup, modelo, ajuste_elasticidade) {
 
   toc()
 
-  rm(fit, base_ts, base_chave, hist)
+  list(proj = proj, real = real, series = series, resumo_exog = resumo_exog, anomalias = anomalias)
+}
+
+# Projeção de um segmento x alvo: economias por chave (uma vez) e depois cada
+# categoria com a sua agregação e modelo
+projeta_alvo = function(seg, alvo, escolhas_alvo) {
+
+  base = bases[[seg]]
+  mun_exog = exog_municipal(base)
+
+  base_chave = prepara_chave(base, alvo, as.Date(fim_hist), tratar_outliers)
+
+  ## Economias -----------------------------------------------------------------
+
+  econ_chave = projeta_economias_chave(base_chave, fim_hist, periodos_proj, n_workers,
+                                       nivel_economias[[seg]], min_obs_econ)
+
+  premissa_resumo = NULL
+
+  if (!is.null(premissa_economias) && seg %in% premissa_economias_segmentos) {
+
+    alocacao = aloca_premissa_economias(premissa_economias, base_chave, alvo,
+                                        de_para_utilizacao, fim_hist, cobertura_premissa)
+
+    econ_chave = aplica_premissa_chave(econ_chave, alocacao, base_chave, fim_hist,
+                                       economias_fora_premissa)
+
+    premissa_resumo = alocacao$alocado %>%
+      inner_join(base_chave %>% distinct(chave, cd_regiao_adj, categoria_detalhe, recorte), by = "chave") %>%
+      group_by(cd_regiao_adj, categoria_detalhe, recorte, periodo, regra) %>%
+      summarise(incremento = sum(incremento), .groups = "drop")
+
+    message(glue("Premissa de economias ({seg} | {alvo}): {number(alocacao$total, big.mark = '.')} | ",
+                 "não alocado: {number(alocacao$nao_alocado, big.mark = '.')}"))
+  }
+
+  ## Categorias ----------------------------------------------------------------
+
+  res = escolhas_alvo %>%
+    pmap(function(categoria_detalhe, agrupamento, modelo, ajuste_elasticidade, ...) {
+      projeta_categoria(seg, alvo, categoria_detalhe, agrupamento, modelo, ajuste_elasticidade,
+                        base_chave, econ_chave, mun_exog)
+    }) %>%
+    set_names(escolhas_alvo$categoria_detalhe)
+
+  rm(base_chave, econ_chave)
   gc()
 
-  list(proj = proj, real = real, encerradas = encerradas,
-       resumo_exog = resumo_exog, anomalias = anomalias, premissa = premissa_resumo)
+  list(proj = map_dfr(res, "proj"),
+       real = map_dfr(res, "real"),
+       series = imap_dfr(res, ~ mutate(.x$series, categoria_detalhe = .y, .before = 1)),
+       resumo_exog = res[[1]]$resumo_exog,
+       anomalias = res[[1]]$anomalias,
+       premissa = premissa_resumo)
 }
 
 resultados = escolhas %>%
-  mutate(res = pmap(list(segmento, alvo, agrupamento, modelo, ajuste_elasticidade),
-                    projeta_alvo))
+  nest(escolhas_alvo = -c(segmento, alvo)) %>%
+  mutate(res = pmap(list(segmento, alvo, escolhas_alvo), projeta_alvo))
 
 
 # 4. CONSOLIDAÇÃO --------------------------------------------------------------
@@ -449,9 +491,8 @@ anual_total %>%
   select(segmento, alvo, ano, vol, var_vol, var_economias, var_consumo, meses_proj) %>%
   print(n = Inf)
 
-series = resultados %>%
-  transmute(segmento, alvo, agrupamento, modelo, ajuste_elasticidade,
-            map_dfr(res, "encerradas"))
+series = desaninha("series") %>%
+  left_join(escolhas, by = c("segmento", "alvo", "categoria_detalhe"))
 
 exog_cenarios = desaninha("resumo_exog") %>%
   mutate(periodo = as.Date(periodo))
@@ -490,7 +531,7 @@ premissas = tribble(
   "CAGED", "tendência dos últimos 12 meses",
   "Nível dos reservatórios", "auto.arima na série histórica",
   "Economias", glue("ETS amortecido no log (séries com {min_obs_econ}+ meses); demais: último valor"),
-  "Economias - total entre categorias", paste(names(economias_agrega_categorias), economias_agrega_categorias, sep = ": ", collapse = " | "),
+  "Economias - nível do ETS", paste(names(nivel_economias), map_chr(nivel_economias, paste, collapse = " x "), sep = ": ", collapse = " | "),
   "Economias - premissa da engenharia", if (usar_premissa_economias) {
     glue("{basename(arq_premissa_economias)} ({paste(premissa_economias_segmentos, collapse = ', ')}); ",
          "fora da premissa: {economias_fora_premissa}; cobertura: {cobertura_premissa}; colunas *_ets = só ETS")

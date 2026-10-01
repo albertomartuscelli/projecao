@@ -20,25 +20,38 @@ de funções precisa estar no mesmo diretório de trabalho (ou ajuste o caminho)
 
 ## Backtesting
 
-Responde duas perguntas para cada alvo (`med_agua`, `fat_agua`, `med_esg`, `fat_esg`):
+Responde duas perguntas para cada alvo (`med_agua`, `med_esg`) e **cada
+categoria** (Normal, Social e Social Vulnerável; Comercial, Industrial e
+Pública):
 
-1. **Qual o melhor modelo?** SNAIVE (benchmark) e ARIMA com regressoras incrementais
-   (temperatura, chuva, nível dos reservatórios, tarifa, CAGED).
+1. **Qual o melhor modelo?** Catálogo em `modelos_catalogo`:
+
+   | Modelo | Variável | Especificação |
+   |---|---|---|
+   | `arima_0` a `arima_5` | consumo/economia | ARIMA com regressoras incrementais: temperatura, chuva, nível dos reservatórios, tarifa, CAGED |
+   | `arima_2_D1` | consumo/economia | diferença sazonal forçada (segue o nível do ano anterior) |
+   | `arima_5_d1_0` | consumo/economia | diferença simples forçada, sem constante (sem drift) |
+   | `vol_arima_2`, `vol_arima_5`, `vol_arima_5_D1_0` | volume direto | mesmas regressoras, sem passar pelas economias |
+   | `snaive` | consumo/economia | benchmark: entra nas tabelas, mas não é escolhido |
+
 2. **Qual a melhor agregação?** `G1_municipioA_clusterBC` (municípios A
-   individuais, B/C agrupados por regional; SP/Osasco/Guarulhos por ATC), `G2_superintendencia` e
-   `G3_municipio` (nível da chave).
+   individuais, B/C agrupados por regional; SP/Osasco/Guarulhos por ATC) e
+   `G2_superintendencia`. `G3_municipio` (nível da chave) fica definido, fora
+   da lista por desempenho.
 
 Como funciona:
 
-- Variável modelada: consumo por economia (`log`). O volume do teste é
-  consumo previsto × economias reais.
+- Consumo/economia × **economias projetadas** (ETS) no teste, como na
+  projeção. Assim a comparação com o volume direto é justa
+  (`economias_teste = "reais"` isola só o modelo de consumo).
 - Outliers: `tsclean` no consumo só na janela de treino; a acurácia é medida
-  contra o volume bruto.
+  contra o volume bruto. Mar+abr/2026 são avaliados como um bimestre.
 - Exógenas no teste: `realizado` (ex-post) e três cenários ex-ante
   (`base`, `quente_seco`, `frio_umido`).
-- Seleção: WAPE por superintendência no cenário `base` (parametrizável). O WAPE
-  em nível de superintendência não deixa erros de regiões diferentes se
-  compensarem, como acontece no MAPE do total.
+- Seleção: WAPE por superintendência dentro de cada categoria, no cenário
+  `base`. Em empate técnico (`tolerancia_selecao`), fica a agregação com
+  menos séries. A linha `COMBINADO / escolha` nas tabelas de acurácia mede o
+  conjunto (cada categoria com a sua escolha).
 - Séries curtas ou sem modelo entram com fallback (sazonal ingênuo → média de
   12 meses → média do segmento), para o total do teste ficar completo.
 
@@ -51,15 +64,16 @@ Saídas em `05_FRAMEWORK_5/03_BACKTESTING/<segmento>/`:
 
 ## Projeção
 
-Volume = consumo/economia × economias × fator tarifário
+Volume = consumo/economia × economias × fator tarifário (nos modelos `vol_*`,
+o volume vem direto do modelo e só recebe o fator tarifário)
 
 | Componente | Premissa |
 |---|---|
-| Consumo/economia | Modelo e agregação da decisão do backtest, ajustados em todo o histórico |
+| Consumo/economia ou volume | Modelo e agregação da decisão do backtest **por categoria**, ajustados em todo o histórico. Água e esgoto faturados usam a escolha do medido do mesmo serviço |
 | Clima | Cenário principal `el_nino`: média do mês no histórico + anomalias do El Niño análogo em 2027. Alternativas: `base` (só a média), `quente_seco` e `frio_umido` (±1 desvio-padrão) |
 | CAGED | Tendência dos últimos 12 meses |
 | Nível dos reservatórios | `auto.arima` na série histórica |
-| Economias | Residencial em 2027: premissa da engenharia (entregas mensais de novas economias por município × utilização × água/esgoto), repartida entre as chaves do município pelo estoque e somada ao estoque de dez/2026. Demais casos: ETS amortecido no log (no residencial, no total das categorias, repartido pela participação do último mês). Colunas `*_ets` mostram o resultado só com ETS |
+| Economias | Projetadas por chave, uma vez por alvo: ETS amortecido no log do total de cada nível (`nivel_economias`: superintendência × recorte no residencial, somando as categorias por causa da migração normal → social; superintendência × categoria no não residencial), repartido pela participação de cada chave no último mês. Residencial em 2027: premissa da engenharia somada ao estoque de dez/2026 nas chaves dos municípios cobertos. Colunas `*_ets` mostram o resultado só com ETS |
 | Tarifa real (IRT) | Último valor deflacionado pelo IPCA mês a mês; reajuste nominal de 6,5% em abr/2027 |
 | Fator tarifário | (IRT projetado / IRT médio dos últimos 12 meses) ^ elasticidade |
 

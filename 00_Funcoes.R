@@ -87,17 +87,32 @@ regras_agrupamento = list(
                              municipio))
 )
 
-modelos_candidatos = list(
-  # benchmark
+# Catálogo de modelos. Cada backtest escolhe os seus em `cfg$modelos`.
+#   arima_k      : consumo/economia, ordens escolhidas automaticamente
+#   arima_2_D1   : diferença sazonal forçada (segue o nível do ano anterior)
+#   arima_5_d1_0 : diferença simples forçada, sem constante (sem drift)
+#   vol_*        : volume direto (sem passar pelas economias)
+#   snaive       : benchmark - aparece nas tabelas, mas não é escolhido
+modelos_catalogo = list(
   snaive  = SNAIVE(log(consumo)),
-  # candidatos
   arima_0 = ARIMA(log(consumo) ~ pdq(0:2, 0:1, 0:2) + PDQ(0:1, 0:1, 0:1)),
   arima_1 = ARIMA(log(consumo) ~ pdq(0:2, 0:1, 0:2) + PDQ(0:1, 0:1, 0:1) + log(temp_med)),
   arima_2 = ARIMA(log(consumo) ~ pdq(0:2, 0:1, 0:2) + PDQ(0:1, 0:1, 0:1) + log(temp_med) + log(prec_tot)),
   arima_3 = ARIMA(log(consumo) ~ pdq(0:2, 0:1, 0:2) + PDQ(0:1, 0:1, 0:1) + log(temp_med) + log(prec_tot) + lag_nv_sim),
   arima_4 = ARIMA(log(consumo) ~ pdq(0:2, 0:1, 0:2) + PDQ(0:1, 0:1, 0:1) + log(temp_med) + log(prec_tot) + lag_nv_sim + tarifa),
-  arima_5 = ARIMA(log(consumo) ~ pdq(0:2, 0:1, 0:2) + PDQ(0:1, 0:1, 0:1) + log(temp_med) + log(prec_tot) + lag_nv_sim + tarifa + log(caged))
+  arima_5 = ARIMA(log(consumo) ~ pdq(0:2, 0:1, 0:2) + PDQ(0:1, 0:1, 0:1) + log(temp_med) + log(prec_tot) + lag_nv_sim + tarifa + log(caged)),
+  arima_2_D1   = ARIMA(log(consumo) ~ pdq(0:2, 0:1, 0:2) + PDQ(0:1, 1, 0:1) + log(temp_med) + log(prec_tot)),
+  arima_5_d1_0 = ARIMA(log(consumo) ~ 0 + pdq(0:2, 1, 0:2) + PDQ(0:1, 0:1, 0:1) + log(temp_med) + log(prec_tot) + lag_nv_sim + tarifa + log(caged)),
+  vol_arima_2  = ARIMA(log(volume) ~ pdq(0:2, 0:1, 0:2) + PDQ(0:1, 0:1, 0:1) + log(temp_med) + log(prec_tot)),
+  vol_arima_5  = ARIMA(log(volume) ~ pdq(0:2, 0:1, 0:2) + PDQ(0:1, 0:1, 0:1) + log(temp_med) + log(prec_tot) + lag_nv_sim + tarifa + log(caged)),
+  vol_arima_5_D1_0 = ARIMA(log(volume) ~ 0 + pdq(0:2, 0:1, 0:2) + PDQ(0:1, 1, 0:1) + log(temp_med) + log(prec_tot) + lag_nv_sim + tarifa + log(caged))
 )
+
+# Modelos que não podem ser escolhidos (só referência)
+modelos_benchmark = "snaive"
+
+# Modelos de volume direto (resposta = volume; ajustados num mable à parte)
+modelos_volume = names(modelos_catalogo)[str_starts(names(modelos_catalogo), "vol_")]
 
 # Economias: ETS amortecido no log. Definido aqui (ambiente global) para que o
 # envio aos workers não carregue junto os objetos da função que o chama.
@@ -105,7 +120,8 @@ modelo_economias = list(ets = ETS(log(econ) ~ error("A") + trend("Ad") + season(
 
 # Modelos que já têm a tarifa como regressora (na projeção, não recebem o
 # ajuste de elasticidade, para não contar o efeito duas vezes)
-modelos_com_tarifa = c("arima_4", "arima_5")
+modelos_com_tarifa = names(modelos_catalogo)[
+  map_lgl(modelos_catalogo, ~ any(str_detect(deparse(.x$formula), "tarifa")))]
 
 # Termos em log -> coeficiente já é elasticidade.
 # Termos em nível -> semi-elasticidade; elasticidade = beta x média no treino.
@@ -307,7 +323,9 @@ monta_base_ts = function(base_chave, regra, mun_exog, glob_exog) {
            consumo = vol_ajust/econ_ajust,
            consumo = if_else(is.finite(consumo) & consumo > 0, consumo, NA_real_),
            across(c(consumo, econ_ajust, prec_tot, temp_med, caged),
-                  ~ na.approx(., na.rm = FALSE, rule = 2))) %>%
+                  ~ na.approx(., na.rm = FALSE, rule = 2)),
+           # volume modelado (ajustado, com buracos preenchidos)
+           volume = consumo * econ_ajust) %>%
     ungroup() %>%
     left_join(glob_exog %>% mutate(periodo = yearmonth(periodo)), by = "periodo") %>%
     as_tsibble(key = all_of(chaves_ts), index = periodo)
@@ -483,19 +501,35 @@ ajusta_modelos = function(dados, modelos, n_workers) {
   fit
 }
 
+# Ajusta modelos do catálogo: um mable por variável-resposta (consumo e
+# volume), porque o fable não mistura respostas diferentes no mesmo mable
+ajusta_catalogo = function(dados, nomes, n_workers) {
+  grupos = split(nomes, if_else(nomes %in% modelos_volume, "volume", "consumo"))
+  map(grupos, ~ ajusta_modelos(dados, modelos_catalogo[.x], n_workers))
+}
+
 # Forecast sempre sequencial: copiar os modelos para os workers custa mais que
-# prever (e pode estourar future.globals.maxSize)
+# prever (e pode estourar future.globals.maxSize). `fit`: mable ou lista de
+# mables. `prev` = consumo/economia (modelos de consumo) ou volume (vol_*).
 prever = function(fit, cenarios) {
   plan(sequential)
+  if (!inherits(fit, "mdl_df")) {
+    return(map_dfr(compact(fit), ~ prever(.x, cenarios)))
+  }
   imap_dfr(cenarios, function(nd, nm) {
     nd = as_tsibble(nd, key = all_of(chaves_ts), index = periodo)
     fit %>%
       filtra_chaves(nd) %>%
       fabletools::forecast(new_data = nd) %>%
       as_tibble() %>%
-      select(all_of(chaves_ts), .model, periodo, consumo_prev = .mean) %>%
+      select(all_of(chaves_ts), .model, periodo, prev = .mean) %>%
       mutate(cenario = nm)
   })
+}
+
+# Nomes dos modelos numa lista de mables
+nomes_fit = function(fit) {
+  unlist(map(compact(fit), ~ setdiff(names(.x), chaves_ts)))
 }
 
 # Fallback para séries sem modelo (curtas, iniciadas recentemente, ou ARIMA que
@@ -559,21 +593,25 @@ backtest_agrupamento = function(base_chave, agrup, cfg, ctx) {
   # FIT
   arq_fit = file.path(cfg$dir_saida, "modelos", glue("fit_{ctx$rotulo}_{agrup}.rds"))
 
-  # O fit salvo só é reaproveitado se tiver todos os modelos candidatos atuais
-  fit_model = if (cfg$reaproveitar_fit & file.exists(arq_fit)) readRDS(arq_fit) else NULL
+  # O fit salvo só é reaproveitado se tiver todos os modelos pedidos
+  # (lista de mables: consumo e volume)
+  modelos = cfg$modelos %||% names(modelos_catalogo)
 
-  if (!is.null(fit_model) && !all(names(modelos_candidatos) %in% names(fit_model))) {
-    message("Fit salvo sem todos os modelos candidatos - reestimando.")
+  fit_model = if (cfg$reaproveitar_fit & file.exists(arq_fit)) readRDS(arq_fit) else NULL
+  if (inherits(fit_model, "mdl_df")) fit_model = list(consumo = fit_model)   # formato antigo
+
+  if (!is.null(fit_model) && !all(modelos %in% nomes_fit(fit_model))) {
+    message("Fit salvo sem todos os modelos pedidos - reestimando.")
     fit_model = NULL
   }
 
   if (is.null(fit_model)) {
-    fit_model = ajusta_modelos(train, modelos_candidatos, cfg$n_workers)
+    fit_model = ajusta_catalogo(train, modelos, cfg$n_workers)
     saveRDS(fit_model, arq_fit)
   }
 
-  fit_model = fit_model %>%
-    select(all_of(chaves_ts), all_of(names(modelos_candidatos)))
+  fit_model = map(fit_model, ~ .x %>% select(all_of(chaves_ts), any_of(modelos))) %>%
+    keep(~ ncol(.x) > length(chaves_ts))
 
   # FORECAST: realizado (ex-post) + cenários ex-ante
   cenarios = c(list(realizado = new_data %>%
@@ -590,24 +628,38 @@ backtest_agrupamento = function(base_chave, agrup, cfg, ctx) {
 
   grade = teste_real %>%
     select(all_of(chaves_ts), periodo) %>%
-    crossing(.model = names(modelos_candidatos), cenario = names(cenarios))
+    crossing(.model = nomes_fit(fit_model), cenario = names(cenarios))
 
   fallback = monta_fallback(base_ts, grade, ctx$fim_treino)
+
+  # Economias usadas no consumo/economia: projetadas (como na projeção, o que
+  # deixa a comparação com o volume direto justa) ou reais do teste
+  econ_proj = if (cfg$economias_teste %||% "projetadas" == "projetadas") {
+    projeta_economias(base_ts, info_series %>% filter(ativa), ctx$periodos_teste, ctx$fim_treino,
+                      cfg$n_workers, agrega_categorias = cfg$economias_agrega_categorias %||% FALSE) %>%
+      select(all_of(chaves_ts), periodo, econ_proj = n_economias)
+  } else {
+    tibble(!!!set_names(rep(list(character()), length(chaves_ts)), chaves_ts),
+           periodo = yearmonth(character()), econ_proj = numeric())
+  }
 
   fit_x_real = grade %>%
     left_join(fc, by = c(chaves_ts, "periodo", ".model", "cenario")) %>%
     left_join(fallback, by = c(chaves_ts, "periodo")) %>%
+    left_join(econ_proj, by = c(chaves_ts, "periodo")) %>%
     left_join(info_series %>% select(all_of(chaves_ts), elegivel), by = chaves_ts) %>%
-    mutate(fallback = case_when(!elegivel ~ "nao_elegivel",
-                                !is.finite(consumo_prev) ~ "falha_modelo",
-                                T ~ "modelo"),
-           consumo_prev = if_else(fallback == "modelo", consumo_prev, consumo_fb)) %>%
     left_join(teste_real %>% select(all_of(chaves_ts), periodo,
                                     vol_ajust, vol_bruto, econ_ajust, econ_bruto),
               by = c(chaves_ts, "periodo")) %>%
-    mutate(n_economias  = if (cfg$alvo_real == "ajustado") econ_ajust else econ_bruto,
+    mutate(fallback = case_when(!elegivel ~ "nao_elegivel",
+                                !is.finite(prev) ~ "falha_modelo",
+                                T ~ "modelo"),
+           n_economias  = if (cfg$alvo_real == "ajustado") econ_ajust else econ_bruto,
            vol_med_real = if (cfg$alvo_real == "ajustado") vol_ajust else vol_bruto,
-           vol_med_fit  = consumo_prev * n_economias,
+           econ_uso     = coalesce(econ_proj, n_economias),
+           vol_med_fit  = case_when(fallback != "modelo" ~ consumo_fb * econ_uso,
+                                    .model %in% modelos_volume ~ prev,
+                                    T ~ prev * econ_uso),
            agrupamento  = agrup) %>%
     select(agrupamento, cenario, .model, all_of(chaves_ts), periodo,
            n_economias, vol_med_real, vol_med_fit, fallback)
@@ -791,55 +843,104 @@ aloca_premissa_economias = function(premissa, base_chave, alvo, de_para, fim_his
        por_regra = alocado %>% group_by(regra) %>% summarise(incremento = sum(incremento), .groups = "drop"))
 }
 
-# Substitui o ETS pela premissa a partir do 1º mês dela:
-#   estoque(t) = estoque(mês anterior à premissa) + incremento acumulado
-#                + parte fora da premissa x crescimento do ETS
-# `fora = "ets"`: municípios fora da premissa seguem o ETS; "zero": ficam constantes.
-# Antes da premissa (ex.: set-dez/2026) vale o ETS.
-aplica_premissa_economias = function(econ_ets, alocacao, base_chave, regra, fim_hist, fora = "ets") {
+# Economias projetadas por chave (projeção). ETS amortecido no log do total de
+# cada `nivel` (ex.: superintendência x recorte, somando as categorias para não
+# extrapolar a migração normal -> social), repartido entre as chaves ativas
+# pela participação no último mês. Totais curtos repetem o último valor.
+projeta_economias_chave = function(base_chave, fim_hist, periodos, n_workers, nivel, min_obs = 24) {
 
-  mapa = base_chave %>%
+  ult = base_chave %>%
     filter(periodo == as.Date(fim_hist)) %>%
-    mutate(grupo = !!regra,
-           municipio_norm = normaliza_nome(municipio)) %>%
-    select(chave, all_of(chaves_ts), municipio_norm, econ)
+    select(chave, all_of(nivel), econ_ult = econ_ajust) %>%
+    group_by(across(all_of(nivel))) %>%
+    mutate(part = econ_ult/sum(econ_ult)) %>%
+    ungroup()
 
-  s_fora = mapa %>%
-    group_by(across(all_of(chaves_ts))) %>%
-    summarise(s_fora = sum(econ[!municipio_norm %in% alocacao$municipios])/sum(econ),
-              econ_ult = sum(econ),
-              .groups = "drop")
+  tot = base_chave %>%
+    filter(periodo <= as.Date(fim_hist)) %>%
+    group_by(across(all_of(nivel)), periodo) %>%
+    summarise(econ = sum(econ_ajust), .groups = "drop") %>%
+    semi_join(ult, by = nivel) %>%
+    mutate(periodo = yearmonth(periodo)) %>%
+    as_tsibble(key = all_of(nivel), index = periodo) %>%
+    fill_gaps() %>%
+    group_by_key() %>%
+    mutate(econ = na.approx(econ, na.rm = FALSE, rule = 2)) %>%
+    ungroup()
 
-  inc = alocacao$alocado %>%
-    inner_join(mapa %>% select(chave, all_of(chaves_ts)), by = "chave") %>%
-    group_by(across(all_of(chaves_ts)), periodo) %>%
-    summarise(inc = sum(incremento), .groups = "drop")
+  longas = tot %>%
+    as_tibble() %>%
+    count(across(all_of(nivel))) %>%
+    filter(n >= min_obs)
+
+  fc = tot %>%
+    semi_join(longas, by = nivel) %>%
+    ajusta_modelos(modelo_economias, n_workers) %>%
+    fabletools::forecast(h = length(periodos)) %>%
+    as_tibble() %>%
+    select(all_of(nivel), periodo, econ_tot = .mean)
+
+  ult %>%
+    crossing(periodo = periodos) %>%
+    left_join(fc, by = c(nivel, "periodo")) %>%
+    mutate(econ_metodo = if_else(is.finite(econ_tot), "ets_amortecido", "ultimo_valor"),
+           n_economias = if_else(is.finite(econ_tot), econ_tot * part, econ_ult),
+           n_economias_ets = n_economias) %>%
+    select(chave, periodo, n_economias, n_economias_ets, econ_metodo)
+}
+
+# Premissa da engenharia por chave, a partir do 1º mês dela:
+#   chave coberta : estoque do mês anterior à premissa + entregas acumuladas
+#   não coberta   : ETS (`fora = "ets"`) ou estoque constante (`"zero"`)
+# Antes da premissa (ex.: set-dez/2026) vale o ETS.
+aplica_premissa_chave = function(econ_chave, alocacao, base_chave, fim_hist, fora = "ets") {
+
+  cobertas = base_chave %>%
+    distinct(chave, municipio) %>%
+    mutate(coberta = normaliza_nome(municipio) %in% alocacao$municipios) %>%
+    select(chave, coberta)
 
   p0 = min(alocacao$alocado$periodo)
   ref = p0 - 1
 
   econ_ref = if (ref > fim_hist) {
-    econ_ets %>% filter(periodo == ref) %>% select(all_of(chaves_ts), econ_ref = n_economias)
+    econ_chave %>% filter(periodo == ref) %>% select(chave, econ_ref = n_economias)
   } else {
-    s_fora %>% select(all_of(chaves_ts), econ_ref = econ_ult)
+    base_chave %>% filter(periodo == as.Date(fim_hist)) %>% select(chave, econ_ref = econ_ajust)
   }
 
-  econ_ets %>%
-    left_join(econ_ref, by = chaves_ts) %>%
-    left_join(s_fora %>% select(-econ_ult), by = chaves_ts) %>%
-    left_join(inc, by = c(chaves_ts, "periodo")) %>%
-    mutate(s_fora = coalesce(s_fora, 1),
-           inc = coalesce(inc, 0)) %>%
-    group_by(across(all_of(chaves_ts))) %>%
+  inc = alocacao$alocado %>%
+    group_by(chave, periodo) %>%
+    summarise(inc = sum(incremento), .groups = "drop")
+
+  econ_chave %>%
+    left_join(cobertas, by = "chave") %>%
+    left_join(econ_ref, by = "chave") %>%
+    left_join(inc, by = c("chave", "periodo")) %>%
+    mutate(inc = coalesce(inc, 0)) %>%
+    group_by(chave) %>%
     arrange(periodo, .by_group = TRUE) %>%
     mutate(inc_acum = cumsum(if_else(periodo >= p0, inc, 0))) %>%
     ungroup() %>%
-    mutate(usa = periodo >= p0 & (s_fora < 1 | fora == "zero"),
-           cresc_fora = if (fora == "ets") s_fora * (n_economias - econ_ref) else 0,
-           n_economias_ets = n_economias,
-           n_economias = if_else(usa, econ_ref + inc_acum + cresc_fora, n_economias),
-           econ_metodo = if_else(usa, "premissa_engenharia", econ_metodo)) %>%
-    select(all_of(chaves_ts), periodo, n_economias, n_economias_ets, econ_metodo)
+    mutate(usa = periodo >= p0 & (coalesce(coberta, FALSE) | fora == "zero"),
+           n_economias = if_else(usa, econ_ref + if_else(coalesce(coberta, FALSE), inc_acum, 0), n_economias),
+           econ_metodo = if_else(usa & coalesce(coberta, FALSE), "premissa_engenharia", econ_metodo)) %>%
+    select(chave, periodo, n_economias, n_economias_ets, econ_metodo)
+}
+
+# Soma as economias por chave nas séries de um agrupamento
+economias_series = function(econ_chave, base_chave, regra, fim_hist) {
+  mapa = base_chave %>%
+    filter(periodo == as.Date(fim_hist)) %>%
+    mutate(grupo = !!regra) %>%
+    select(chave, all_of(chaves_ts))
+
+  econ_chave %>%
+    inner_join(mapa, by = "chave") %>%
+    group_by(across(all_of(chaves_ts)), periodo) %>%
+    summarise(econ_metodo = names(sort(table(econ_metodo), decreasing = TRUE))[1],
+              across(c(n_economias, n_economias_ets), sum),
+              .groups = "drop")
 }
 
 
@@ -859,8 +960,9 @@ metricas = function(real, fit, econ) {
 }
 
 # Agrega no nível, calcula erros por célula (elemento x mês) e resume.
-# `detalhe = TRUE` devolve as métricas por elemento do nível.
-calc_acc = function(base, nivel, lca = NULL, detalhe = FALSE) {
+# `detalhe = TRUE` devolve as métricas por elemento do nível; `por` resume
+# separado por essa(s) coluna(s) (ex.: categoria_detalhe).
+calc_acc = function(base, nivel, lca = NULL, detalhe = FALSE, por = NULL) {
 
   if (!is.null(lca$x_real) && all(nivel %in% lca$chaves)) {
     base = bind_rows(base, lca$x_real)
@@ -872,7 +974,7 @@ calc_acc = function(base, nivel, lca = NULL, detalhe = FALSE) {
               .groups = "drop") %>%
     filter(vol_med_real > 0)
 
-  grp = c("agrupamento", "cenario", ".model", if (detalhe) nivel)
+  grp = unique(c("agrupamento", "cenario", ".model", if (detalhe) nivel, por))
 
   agg %>%
     group_by(across(all_of(grp))) %>%
@@ -893,30 +995,35 @@ agrupa_meses = function(df, grupos) {
 }
 
 # Pergunta 1 - qual o melhor modelo? (melhor agrupamento de cada modelo)
-tabela_modelos = function(acc_sel, metrica) {
+tabela_modelos = function(acc_sel, metrica, por = NULL) {
   acc_sel %>%
-    filter(agrupamento != "LCA") %>%
-    group_by(.model) %>%
+    filter(!agrupamento %in% c("LCA", "COMBINADO")) %>%
+    group_by(across(all_of(c(por, ".model")))) %>%
     summarise(melhor_agrupamento = agrupamento[which.min(.data[[metrica]])],
               metrica_melhor = min(.data[[metrica]]),
               metrica_media_agrupamentos = mean(.data[[metrica]]),
               .groups = "drop") %>%
-    arrange(metrica_melhor) %>%
-    mutate(rank = row_number(), .before = 1)
+    mutate(benchmark = .model %in% modelos_benchmark) %>%
+    group_by(across(all_of(por))) %>%
+    arrange(metrica_melhor, .by_group = TRUE) %>%
+    mutate(rank = row_number(), .before = 1) %>%
+    ungroup()
 }
 
 # Pergunta 2 - qual a melhor agregação? (melhor modelo de cada agrupamento)
-tabela_agregacao = function(acc_sel, metrica, n_series) {
+tabela_agregacao = function(acc_sel, metrica, n_series, por = NULL) {
   acc_sel %>%
-    filter(agrupamento != "LCA") %>%
-    group_by(agrupamento) %>%
+    filter(!agrupamento %in% c("LCA", "COMBINADO"), !.model %in% modelos_benchmark) %>%
+    group_by(across(all_of(c(por, "agrupamento")))) %>%
     summarise(melhor_modelo = .model[which.min(.data[[metrica]])],
               metrica_melhor = min(.data[[metrica]]),
               metrica_mediana_modelos = median(.data[[metrica]]),
               .groups = "drop") %>%
     left_join(n_series, by = "agrupamento") %>%
-    arrange(metrica_melhor) %>%
-    mutate(rank = row_number(), .before = 1)
+    group_by(across(all_of(por))) %>%
+    arrange(metrica_melhor, .by_group = TRUE) %>%
+    mutate(rank = row_number(), .before = 1) %>%
+    ungroup()
 }
 
 
@@ -941,9 +1048,8 @@ calc_coeficientes = function(res) {
                 peso = sum(tail(vol_ajust, 12), na.rm = T),
                 .groups = "drop")
 
-    r$fit_model %>%
-      select(all_of(chaves_ts), starts_with("arima")) %>%
-      coef() %>%
+    map_dfr(compact(r$fit_model),
+            ~ .x %>% select(all_of(chaves_ts), matches("arima")) %>% coef()) %>%
       inner_join(termos_elast, by = "term") %>%
       left_join(medias, by = chaves_ts) %>%
       mutate(agrupamento = agrup, .before = 1)
@@ -1034,7 +1140,7 @@ graf_elast_nivel = function(elast_nivel, var_x, titulo) {
 # residual (em log ~ erro % no ajuste) e Ljung-Box (24 lags) nas inovações
 diag_series = function(res, agrup, mod, fit_x_real, cenario) {
 
-  fit = res[[agrup]]$fit_model %>%
+  fit = keep(res[[agrup]]$fit_model, ~ mod %in% names(.x))[[1]] %>%
     select(all_of(chaves_ts), all_of(mod))
 
   espec = fit %>%
@@ -1252,55 +1358,93 @@ executa_backtest = function(base, alvo, cfg) {
   fit_x_aval = agrupa_meses(fit_x_real, cfg$meses_agrupados)
   if (!is.null(lca)) lca$x_real = agrupa_meses(lca$x_real, cfg$meses_agrupados)
 
-  acc = map(cfg$niveis, ~ calc_acc(fit_x_aval, .x, lca))
+  ## Seleção -------------------------------------------------------------------
+  # Com `selecao_por` (ex.: categoria_detalhe), a métrica do nível de seleção é
+  # calculada em cada categoria e cada uma escolhe sua agregação e modelo.
+  # O benchmark (snaive) entra no ranking, mas não pode ser escolhido.
+  por = cfg$selecao_por %||% character(0)
+  metrica = cfg$metrica_selecao
+  tol = cfg$tolerancia_selecao %||% 0
 
-  acc_detalhe_superint = calc_acc(fit_x_aval, "cd_regiao_adj", lca, detalhe = T)
-
-  acc_sel = acc[[cfg$nivel_selecao]] %>%
+  acc_sel = calc_acc(fit_x_aval, unique(c(cfg$niveis[[cfg$nivel_selecao]], por)), lca, por = por) %>%
     filter(cenario == cfg$cenario_selecao)
 
   ranking = acc_sel %>%
-    arrange(.data[[cfg$metrica_selecao]]) %>%
+    group_by(across(all_of(por))) %>%
+    arrange(.data[[metrica]], .by_group = TRUE) %>%
     mutate(rank = row_number(), .before = 1) %>%
-    left_join(acc$total %>%
-                select(agrupamento, cenario, .model,
-                       MAPE_total = MAPE, WAPE_total = WAPE, Vies_total = Vies),
-              by = c("agrupamento", "cenario", ".model"))
+    ungroup()
 
-  # Escolha: entre as combinações a até `tolerancia_selecao` p.p. da melhor,
-  # fica a agregação com menos séries (mais barata de rodar e de manter)
-  tol = cfg$tolerancia_selecao %||% 0
-
-  melhor = ranking %>%
-    filter(agrupamento != "LCA") %>%
-    filter(.data[[cfg$metrica_selecao]] <= min(.data[[cfg$metrica_selecao]]) + tol) %>%
+  # Entre as combinações a até `tolerancia_selecao` p.p. da melhor, fica a
+  # agregação com menos séries (mais barata de rodar e de manter)
+  melhor_por = ranking %>%
+    filter(agrupamento != "LCA", !.model %in% modelos_benchmark) %>%
     left_join(series %>% select(agrupamento, n_series), by = "agrupamento") %>%
-    arrange(n_series, .data[[cfg$metrica_selecao]]) %>%
-    slice(1)
+    group_by(across(all_of(por))) %>%
+    filter(.data[[metrica]] <= min(.data[[metrica]]) + tol) %>%
+    arrange(n_series, .data[[metrica]], .by_group = TRUE) %>%
+    slice(1) %>%
+    ungroup()
+
+  escolha = melhor_por %>%
+    select(all_of(por), agrupamento, .model)
 
   ranking = ranking %>%
-    mutate(escolhido = agrupamento == melhor$agrupamento & .model == melhor$.model,
-           .after = .model)
+    left_join(escolha %>% mutate(escolhido = TRUE), by = c(por, "agrupamento", ".model")) %>%
+    mutate(escolhido = coalesce(escolhido, FALSE), .after = .model)
 
-  tab_modelos = tabela_modelos(acc_sel, cfg$metrica_selecao)
-  tab_agregacao = tabela_agregacao(acc_sel, cfg$metrica_selecao, series)
+  ref_por = ranking %>%
+    filter(agrupamento != "LCA") %>%
+    group_by(across(all_of(por))) %>%
+    summarise(valor_melhor_absoluto = min(.data[[metrica]][!.model %in% modelos_benchmark]),
+              valor_benchmark = suppressWarnings(min(.data[[metrica]][.model %in% modelos_benchmark])),
+              .groups = "drop") %>%
+    mutate(valor_benchmark = if_else(is.finite(valor_benchmark), valor_benchmark, NA_real_))
 
-  decisao = melhor %>%
+  # "COMBINADO": cada categoria com a sua escolha, para medir o conjunto
+  combina = function(df) {
+    df %>%
+      inner_join(escolha, by = c(por, "agrupamento", ".model")) %>%
+      mutate(agrupamento = "COMBINADO", .model = "escolha")
+  }
+  fit_x_comb = combina(fit_x_real)
+
+  acc = map(cfg$niveis, ~ calc_acc(bind_rows(fit_x_aval, combina(fit_x_aval)), .x, lca))
+
+  acc_detalhe_superint = calc_acc(bind_rows(fit_x_aval, combina(fit_x_aval)), "cd_regiao_adj", lca, detalhe = T)
+
+  comb_total = acc$total %>%
+    filter(agrupamento == "COMBINADO", cenario == cfg$cenario_selecao)
+
+  tab_modelos = tabela_modelos(acc_sel, metrica, por)
+  tab_agregacao = tabela_agregacao(acc_sel, metrica, series, por)
+
+  decisao = (if (length(por)) left_join(melhor_por, ref_por, by = por) else bind_cols(melhor_por, ref_por)) %>%
     transmute(segmento = cfg$segmento,
               alvo = alvo,
+              across(all_of(por)),
               agrupamento,
               modelo = .model,
+              tipo_modelo = if_else(.model %in% modelos_volume, "volume", "consumo/economia"),
               nivel = cfg$nivel_selecao,
               cenario = cfg$cenario_selecao,
-              metrica = cfg$metrica_selecao,
-              valor = .data[[cfg$metrica_selecao]],
-              valor_melhor_absoluto = min(ranking[[cfg$metrica_selecao]][ranking$agrupamento != "LCA"]),
+              metrica = metrica,
+              valor = .data[[metrica]],
+              valor_melhor_absoluto,
+              valor_benchmark,
               tolerancia = tol,
-              MAPE_total, WAPE_total, Vies_total)
+              MAPE_total_combinado = comb_total$MAPE,
+              WAPE_total_combinado = comb_total$WAPE,
+              Vies_total_combinado = comb_total$Vies)
 
-  message(glue("Melhor: {melhor$agrupamento} / {melhor$.model} ",
-               "({cfg$metrica_selecao} {cfg$nivel_selecao} = {number(melhor[[cfg$metrica_selecao]], 0.01)}%, ",
-               "cenário {cfg$cenario_selecao})"))
+  pwalk(decisao, function(...) {
+    d = list(...)
+    message(glue("Melhor{if (length(por)) paste0(' [', d[[por[1]]], ']') else ''}: ",
+                 "{d$agrupamento} / {d$modelo} ({metrica} {cfg$nivel_selecao} = {number(d$valor, 0.01)}%; ",
+                 "benchmark {number(d$valor_benchmark, 0.01)}%)"))
+  })
+
+  melhor = tibble(agrupamento = "COMBINADO", .model = "escolha")
 
   ## Elasticidades -------------------------------------------------------------
 
@@ -1308,27 +1452,28 @@ executa_backtest = function(base, alvo, cfg) {
 
   elasticidades = map(cfg$niveis_elast, ~ resume_elast(coeficientes, .x))
 
-  # gráficos do melhor agrupamento; nas agregações usa o melhor modelo com
-  # regressoras (ou arima_5, se o melhor não tiver)
-  mod_elast = if (melhor$.model %in% unique(coeficientes$.model)) melhor$.model else "arima_5"
+  # gráficos do agrupamento mais escolhido; nas agregações usa o 1º modelo
+  # escolhido com regressoras (ou arima_5)
+  agrup_elast = names(sort(table(escolha$agrupamento), decreasing = TRUE))[1]
+  mod_elast = c(intersect(escolha$.model, unique(coeficientes$.model)), "arima_5")[1]
 
   graf_elast = coeficientes %>%
-    filter(agrupamento == melhor$agrupamento) %>%
+    filter(agrupamento == agrup_elast) %>%
     split(.$term) %>%
     map(~ gera_graf(.x, cfg$dim_graf_elast))
 
   graf_elast_niveis = cfg$niveis_elast %>%
     keep(~ length(.x) == 1) %>%
     imap(~ graf_elast_nivel(elasticidades[[.y]] %>%
-                              filter(agrupamento == melhor$agrupamento, .model == mod_elast),
+                              filter(agrupamento == agrup_elast, .model == mod_elast),
                             .x, glue("Elasticidade por {.y} - {mod_elast}")))
 
   ## Estatísticas dos melhores -------------------------------------------------
 
-  melhores = ranking %>%
-    filter(agrupamento != "LCA") %>%
-    slice_head(n = cfg$n_melhores) %>%
-    select(rank, agrupamento, .model)
+  # Diagnóstico das combinações escolhidas
+  melhores = escolha %>%
+    distinct(agrupamento, .model) %>%
+    mutate(rank = row_number(), .before = 1)
 
   estat_series = map2_dfr(melhores$agrupamento, melhores$.model,
                           ~ diag_series(res, .x, .y, fit_x_aval, cfg$cenario_selecao)) %>%
@@ -1359,7 +1504,7 @@ executa_backtest = function(base, alvo, cfg) {
     group_by(periodo) %>%
     summarise(vol_med = sum(vol_med, na.rm = T)/10^6)
 
-  fc_total = bind_rows(fit_x_real, lca$x_real) %>%
+  fc_total = bind_rows(fit_x_real, fit_x_comb, lca$x_real) %>%
     group_by(agrupamento, cenario, .model, periodo) %>%
     summarise(vol_med = sum(vol_med_fit, na.rm = T)/10^6, .groups = "drop")
 
@@ -1369,10 +1514,11 @@ executa_backtest = function(base, alvo, cfg) {
     real_x_forecast = graf_real_fc(real_total, fc_total, cfg$cenario_selecao,
                                    glue("{cfg$segmento} - {alvo}: real x forecast")),
     melhor_cenarios = graf_melhor_cenarios(real_total, fc_total, melhor,
-                                           glue("{cfg$segmento} - {alvo}: melhor modelo ({melhor$agrupamento} / {melhor$.model}) por cenário")),
-    melhor_superint = graf_superint(real_hist, fit_x_real, melhor, cfg$cenario_selecao, ctx$fim_treino - 12),
+                                           glue("{cfg$segmento} - {alvo}: escolha por categoria, por cenário")),
+    melhor_superint = graf_superint(real_hist, fit_x_comb, melhor, cfg$cenario_selecao, ctx$fim_treino - 12),
     heatmap = graf_heat(acc_sel, cfg$metrica_selecao,
-                        glue("{cfg$segmento} - {alvo}: {cfg$metrica_selecao} {cfg$nivel_selecao} - cenário {cfg$cenario_selecao}"))
+                        glue("{cfg$segmento} - {alvo}: {cfg$metrica_selecao} {cfg$nivel_selecao} - cenário {cfg$cenario_selecao}"),
+                        por)
   )
 
   ## Exportação ----------------------------------------------------------------
@@ -1500,12 +1646,15 @@ graf_superint = function(real_hist, fit_x_real, melhor, cenario, desde) {
     tema
 }
 
-graf_heat = function(acc_sel, metrica, titulo) {
+graf_heat = function(acc_sel, metrica, titulo, por = character(0)) {
   acc_sel %>%
+    filter(agrupamento != "LCA") %>%
     ggplot(aes(x = .model, y = agrupamento, fill = .data[[metrica]])) +
     geom_tile(color = "white") +
     geom_text(aes(label = number(.data[[metrica]], 0.01)), size = 3) +
     scale_fill_gradient(low = "#12d0ff", high = "#f9b17f") +
+    {if (length(por)) facet_wrap(vars(.data[[por[1]]]), ncol = 1)} +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
     labs(title = titulo) +
     tema
 }

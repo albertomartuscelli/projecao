@@ -52,10 +52,20 @@ cfg = list(
   # G3_municipio fica fora por desempenho (empatou com G1 a 4x o custo)
   agrupamentos = c("G1_municipioA_clusterBC", "G2_superintendencia"),
 
+  # Modelos testados (catálogo `modelos_catalogo` em 00_Funcoes.R). vol_* =
+  # volume direto; snaive = benchmark (não é escolhido). Menos modelos = mais rápido.
+  modelos = names(modelos_catalogo),
+
+  # Economias no teste para o consumo/economia: "projetadas" (ETS, como na
+  # projeção; comparação justa com o volume direto) | "reais"
+  economias_teste = "projetadas",
+  economias_agrega_categorias = TRUE,     # ETS no total das categorias do grupo
+
   # Tarifa nos cenários ex-ante: realizada (reajuste conhecido) | constante
   tarifa_ex_ante = "realizada",
 
-  # Critério de seleção
+  # Critério de seleção: agregação e modelo escolhidos em cada categoria
+  selecao_por     = "categoria_detalhe",    # NULL = uma escolha para o segmento
   nivel_selecao   = "superintendencia",     # nome em `niveis`
   metrica_selecao = "WAPE",                 # MAPE | WAPE | sMAPE | RMSE | MAE
   cenario_selecao = "base",                 # realizado | base | quente_seco | frio_umido
