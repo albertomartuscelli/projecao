@@ -104,9 +104,10 @@ e `graficos/`.
 
 ## Observações sobre os dados
 
-- Mar/2026 e abr/2026 são meses estimados na base (economias com casas
-  decimais em ~99% das linhas). Eles caem na janela de teste do backtest
-  (jan-ago/2026), então parte da acurácia é medida contra estimativas.
+- Mar/2026 e abr/2026 tiveram problema de faturamento; os volumes foram
+  rebalanceados entre os dois meses pela razão histórica (economias com casas
+  decimais em ~99% das linhas). Só o total do bimestre é real, por isso o
+  backtest avalia mar+abr/2026 como um único período (`meses_agrupados`).
 - Linhas sem volume ou sem economias saem da modelagem; os buracos são
   interpolados no consumo e marcados como `IMPUTADO` no histórico da projeção.
 - A LCA é lida de `05_FRAMEWORK_5/01_BASES/compilado_LCA.csv`; sem o arquivo,

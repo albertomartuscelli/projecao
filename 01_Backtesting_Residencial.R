@@ -35,6 +35,11 @@ cfg = list(
   horizonte      = 8,                       # meses de teste
   min_obs_treino = 36,                      # mínimo de meses p/ ajustar modelo
 
+  # Meses avaliados como um único período (soma). Mar-abr/2026 tiveram
+  # problema de faturamento e os volumes foram rebalanceados pela razão
+  # histórica: só o total do bimestre é real. list() para avaliar mês a mês.
+  meses_agrupados = list(c("2026-03-01", "2026-04-01")),
+
   # Outliers: tsclean no consumo/economia só na janela de treino.
   # A acurácia é medida contra o volume bruto (o que de fato foi medido/faturado).
   tratar_outliers  = TRUE,

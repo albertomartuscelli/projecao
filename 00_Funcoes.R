@@ -713,6 +713,18 @@ calc_acc = function(base, nivel, lca = NULL, detalhe = FALSE) {
     arrange(cenario, MAPE)
 }
 
+# Junta meses do teste num único período antes das métricas (soma real e
+# previsto). Uso: meses em que só o total é confiável, como mar-abr/2026,
+# cujos volumes foram rebalanceados pela razão histórica após problemas de
+# faturamento. `grupos`: lista de vetores de datas; o período fica no 1º mês.
+agrupa_meses = function(df, grupos) {
+  for (g in grupos) {
+    g = yearmonth(as.Date(g))
+    df$periodo[df$periodo %in% g] = g[1]
+  }
+  df
+}
+
 # Pergunta 1 - qual o melhor modelo? (melhor agrupamento de cada modelo)
 tabela_modelos = function(acc_sel, metrica) {
   acc_sel %>%
@@ -1069,9 +1081,13 @@ executa_backtest = function(base, alvo, cfg) {
 
   ## Acurácia ------------------------------------------------------------------
 
-  acc = map(cfg$niveis, ~ calc_acc(fit_x_real, .x, lca))
+  # Meses avaliados em conjunto (ex.: mar+abr/2026 como um bimestre)
+  fit_x_aval = agrupa_meses(fit_x_real, cfg$meses_agrupados)
+  if (!is.null(lca)) lca$x_real = agrupa_meses(lca$x_real, cfg$meses_agrupados)
 
-  acc_detalhe_superint = calc_acc(fit_x_real, "cd_regiao_adj", lca, detalhe = T)
+  acc = map(cfg$niveis, ~ calc_acc(fit_x_aval, .x, lca))
+
+  acc_detalhe_superint = calc_acc(fit_x_aval, "cd_regiao_adj", lca, detalhe = T)
 
   acc_sel = acc[[cfg$nivel_selecao]] %>%
     filter(cenario == cfg$cenario_selecao)
@@ -1148,7 +1164,7 @@ executa_backtest = function(base, alvo, cfg) {
     select(rank, agrupamento, .model)
 
   estat_series = map2_dfr(melhores$agrupamento, melhores$.model,
-                          ~ diag_series(res, .x, .y, fit_x_real, cfg$cenario_selecao)) %>%
+                          ~ diag_series(res, .x, .y, fit_x_aval, cfg$cenario_selecao)) %>%
     # SNAIVE não tem AICc
     mutate(AICc = if ("AICc" %in% names(.)) AICc else NA_real_)
 
