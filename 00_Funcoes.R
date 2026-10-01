@@ -99,6 +99,10 @@ modelos_candidatos = list(
   arima_5 = ARIMA(log(consumo) ~ pdq(0:2, 0:1, 0:2) + PDQ(0:1, 0:1, 0:1) + log(temp_med) + log(prec_tot) + lag_nv_sim + tarifa + log(caged))
 )
 
+# Economias: ETS amortecido no log. Definido aqui (ambiente global) para que o
+# envio aos workers não carregue junto os objetos da função que o chama.
+modelo_economias = list(ets = ETS(log(econ) ~ error("A") + trend("Ad") + season("N")))
+
 # Modelos que já têm a tarifa como regressora (na projeção, não recebem o
 # ajuste de elasticidade, para não contar o efeito duas vezes)
 modelos_com_tarifa = c("arima_4", "arima_5")
@@ -651,8 +655,7 @@ projeta_economias = function(base_ts, ativas, periodos, fim_hist, n_workers,
 
   fc = tot %>%
     semi_join(longas, by = k) %>%
-    ajusta_modelos(list(ets = ETS(log(econ) ~ error("A") + trend("Ad") + season("N"))),
-                   n_workers) %>%
+    ajusta_modelos(modelo_economias, n_workers) %>%
     fabletools::forecast(h = length(periodos)) %>%
     as_tibble() %>%
     select(all_of(k), periodo, econ_tot = .mean)
