@@ -81,6 +81,9 @@ n_melhores      = 5                    # nº de modelos detalhados na seção 3.
 n_workers        = 20
 reaproveitar_fit = TRUE                # lê o fit salvo em disco se existir
 
+# Limite de dados enviados aos workers no fit (padrão do future: 500 MB)
+options(future.globals.maxSize = 4 * 1024^3)
+
 dir.create(file.path(dir_saida, "graficos"), recursive = TRUE, showWarnings = FALSE)
 dir.create(file.path(dir_saida, "modelos"),  recursive = TRUE, showWarnings = FALSE)
 
@@ -455,6 +458,11 @@ for (agrup in agrupamentos) {
   }
 
   ## 3.3 Forecast --------------------------------------------------------------
+
+  # Sempre sequencial: o fit pode ter vindo do disco numa sessão que ficou em
+  # multisession, e copiar os modelos para os workers é mais lento (e pode
+  # estourar future.globals.maxSize) do que prever direto
+  plan(sequential)
 
   cenarios = monta_cenarios(train, new_data)
 
