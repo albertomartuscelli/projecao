@@ -44,6 +44,7 @@ alvos = c("med_agua", "fat_agua", "med_esg", "fat_esg")
 fim_projecao   = as.Date("2027-12-01")
 min_obs_modelo = 36            # mínimo de meses para ajustar modelo (demais: fallback)
 min_obs_econ   = 24            # mínimo de meses para o ETS das economias
+max_meses_imputacao = 3        # buraco de série no histórico imputado até N meses
 
 # Economias: projetar o total das categorias do grupo e repartir pela
 # participação do último mês? No residencial há migração normal -> social
@@ -343,9 +344,19 @@ projeta_alvo = function(seg, alvo, agrup, modelo, ajuste_elasticidade) {
 
   ## Histórico (real; meses sem dado viram "IMPUTADO") -------------------------
 
+  # Buraco de série (todas as chaves sem dado no mês): só buracos de até
+  # `max_meses_imputacao` meses viram volume IMPUTADO (consumo x economias
+  # interpolados). Buracos maiores são períodos em que a série não existia.
   real = base_ts %>%
     as_tibble() %>%
     filter(periodo <= fim_hist) %>%
+    group_by(across(all_of(chaves_ts))) %>%
+    arrange(periodo, .by_group = TRUE) %>%
+    mutate(bloco = cumsum(preenchido != lag(preenchido, default = FALSE))) %>%
+    group_by(across(all_of(chaves_ts)), bloco) %>%
+    mutate(tam_buraco = if_else(preenchido, n(), 0L)) %>%
+    ungroup() %>%
+    filter(tam_buraco <= max_meses_imputacao) %>%
     transmute(across(all_of(chaves_ts)), periodo,
               tipo = if_else(preenchido, "IMPUTADO", "REAL"),
               n_economias = if_else(preenchido, econ_ajust, econ_bruto),
@@ -485,7 +496,8 @@ premissas = tribble(
          "fora da premissa: {economias_fora_premissa}; cobertura: {cobertura_premissa}; colunas *_ets = só ETS")
   } else "não usada",
   "Outliers", if (tratar_outliers) "tsclean no consumo/economia (histórico)" else "sem tratamento",
-  "Séries curtas/sem modelo", "fallback: sazonal ingênuo -> média 12m -> segmento"
+  "Séries curtas/sem modelo", "fallback: sazonal ingênuo -> média 12m -> segmento",
+  "Histórico imputado", glue("buracos de série de até {max_meses_imputacao} meses (maiores ficam de fora)")
 )
 
 
@@ -495,18 +507,21 @@ rotulos_alvo = c(med_agua = "Água - medido", fat_agua = "Água - faturado",
                  med_esg = "Esgoto - medido", fat_esg = "Esgoto - faturado")
 
 graf_total = function(seg) {
+  # mês inteiro (real + imputado) numa linha; ponto onde a imputação passa de 1%
   dados = mensal %>%
     filter(segmento == seg, periodo >= as.Date("2024-01-01")) %>%
-    group_by(alvo, cenario, periodo, tipo) %>%
-    summarise(vol = sum(vol)/10^6, .groups = "drop") %>%
+    mutate(proj = tipo == "PROJ") %>%
+    group_by(alvo, cenario, periodo, proj) %>%
+    summarise(perc_imputado = sum(vol[tipo == "IMPUTADO"])/sum(vol),
+              vol = sum(vol)/10^6, .groups = "drop") %>%
     mutate(alvo = rotulos_alvo[alvo])
 
   ggplot(data = NULL, aes(x = periodo, y = vol)) +
-    geom_line(data = dados %>% filter(tipo != "PROJ", cenario == cenario_principal),
+    geom_line(data = dados %>% filter(!proj, cenario == cenario_principal),
               aes(color = "Real"), lwd = 1) +
-    geom_point(data = dados %>% filter(tipo == "IMPUTADO", cenario == cenario_principal),
+    geom_point(data = dados %>% filter(!proj, cenario == cenario_principal, perc_imputado > 0.01),
                aes(color = "Imputado"), size = 2) +
-    geom_line(data = dados %>% filter(tipo == "PROJ"),
+    geom_line(data = dados %>% filter(proj),
               aes(color = cenario), lwd = 0.9) +
     facet_wrap(~alvo, scales = "free_y") +
     scale_color_manual("", values = cores_cenario) +
@@ -518,10 +533,10 @@ graf_total = function(seg) {
 graf_categoria = function(seg) {
   mensal %>%
     filter(segmento == seg, cenario == cenario_principal, periodo >= as.Date("2024-01-01")) %>%
+    mutate(tipo = if_else(tipo == "PROJ", "Projeção", "Real")) %>%
     group_by(alvo, categoria_detalhe, periodo, tipo) %>%
     summarise(vol = sum(vol)/10^6, .groups = "drop") %>%
-    mutate(alvo = rotulos_alvo[alvo],
-           tipo = if_else(tipo == "PROJ", "Projeção", "Real")) %>%
+    mutate(alvo = rotulos_alvo[alvo]) %>%
     ggplot(aes(x = periodo, y = vol, color = categoria_detalhe, linetype = tipo)) +
     geom_line(lwd = 0.9) +
     facet_wrap(~alvo, scales = "free_y") +
