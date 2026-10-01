@@ -21,17 +21,20 @@ source("00_Funcoes.R", encoding = "UTF-8")
 
 # 0. PREMISSAS -----------------------------------------------------------------
 
-dir_bases = "05_FRAMEWORK_4/01_BASES"          # entrada
-dir_bt    = "05_FRAMEWORK_5/03_BACKTESTING"    # saída dos backtests (decisão)
+dir_bases = "05_FRAMEWORK_5/01_BASES"
+dir_bt    = "05_FRAMEWORK_5/03_BACKTESTING"    # decisão dos backtests
 dir_saida = "05_FRAMEWORK_5/04_PROJECAO"
+
+# Base única com todas as categorias; cada segmento filtra as suas
+arq_base = file.path(dir_bases, "02_Base Analítica Ajustada_202201-202608.csv")
 
 segmentos = list(
   Residencial = list(
-    arq_base    = file.path(dir_bases, "02_Base Analítica Ajustada_202201-202608_Residencial.csv"),
+    arq_base    = arq_base,
     categorias  = "Residencial",
     arq_decisao = file.path(dir_bt, "Residencial", "00_Decisao_Residencial.xlsx")),
   Nao_Residencial = list(
-    arq_base    = file.path(dir_bases, "02_Base Analítica Ajustada_202201-202608_Não Residencial.csv"),
+    arq_base    = arq_base,
     categorias  = c("Comercial", "Industrial", "Pública"),
     arq_decisao = file.path(dir_bt, "Nao_Residencial", "00_Decisao_Nao_Residencial.xlsx"))
 )

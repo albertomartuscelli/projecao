@@ -13,8 +13,9 @@ residencial e não residencial.
 | `03_Projecao.R` | Projeção até dez/2027 com a agregação e o modelo escolhidos nos backtests |
 
 Rode na ordem 01 → 02 → 03, com o diretório de trabalho na pasta que contém
-`05_FRAMEWORK_4/` (bases de entrada, em `01_BASES`) e `05_FRAMEWORK_5/`
-(saídas). Os scripts fazem `source("00_Funcoes.R")`, então o arquivo
+`05_FRAMEWORK_5/`. A base de entrada é única, com todas as categorias:
+`05_FRAMEWORK_5/01_BASES/02_Base Analítica Ajustada_202201-202608.csv`. Cada
+script filtra as categorias do seu segmento. Os scripts fazem `source("00_Funcoes.R")`, então o arquivo
 de funções precisa estar no mesmo diretório de trabalho (ou ajuste o caminho).
 
 ## Backtesting
@@ -103,10 +104,11 @@ e `graficos/`.
 
 ## Observações sobre os dados
 
-- O volume medido de esgoto está vazio em mar/2026 e abr/2026 em todas as
-  chaves. O backtest exclui esses meses das métricas; a projeção interpola o
-  consumo e marca os meses como `IMPUTADO` no histórico.
-- O nome do arquivo da base não residencial no script é
-  `02_Base Analítica Ajustada_202201-202608_Não Residencial.csv`; ajuste
-  `arq_base` se o nome for outro.
+- Mar/2026 e abr/2026 são meses estimados na base (economias com casas
+  decimais em ~99% das linhas). Eles caem na janela de teste do backtest
+  (jan-ago/2026), então parte da acurácia é medida contra estimativas.
+- Linhas sem volume ou sem economias saem da modelagem; os buracos são
+  interpolados no consumo e marcados como `IMPUTADO` no histórico da projeção.
+- A LCA é lida de `05_FRAMEWORK_5/01_BASES/compilado_LCA.csv`; sem o arquivo,
+  a comparação é ignorada com um aviso.
 - Os scripts são lidos como UTF-8 (padrão do R 4.2+ no Windows).

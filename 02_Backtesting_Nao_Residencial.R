@@ -20,7 +20,7 @@ source("00_Funcoes.R", encoding = "UTF-8")
 
 cfg = list(
   segmento   = "Não Residencial",
-  arq_base   = "05_FRAMEWORK_4/01_BASES/02_Base Analítica Ajustada_202201-202608_Não Residencial.csv",
+  arq_base   = "05_FRAMEWORK_5/01_BASES/02_Base Analítica Ajustada_202201-202608.csv",
   categorias = c("Comercial", "Industrial", "Pública"),
   dir_saida  = "05_FRAMEWORK_5/03_BACKTESTING/Nao_Residencial",
 
