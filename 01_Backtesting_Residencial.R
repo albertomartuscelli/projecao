@@ -47,7 +47,7 @@ cfg = list(
   alvo_real        = "bruto",               # bruto | ajustado
 
   # Agrupamentos a testar (nomes de `regras_agrupamento`)
-  agrupamentos = c("G1_original", "G2_superintendencia", "G3_municipio"),
+  agrupamentos = c("G1_municipioA_clusterBC", "G2_superintendencia", "G3_municipio"),
 
   # Tarifa nos cenários ex-ante: realizada (reajuste conhecido) | constante
   tarifa_ex_ante = "realizada",
@@ -80,7 +80,8 @@ cfg = list(
 
   # Processamento (Windows/RStudio: multisession)
   n_workers        = 20,
-  reaproveitar_fit = TRUE                   # lê o fit salvo em disco se existir
+  reaproveitar_fit = TRUE,                  # lê o fit salvo em disco se existir
+  manter_modelos   = FALSE                  # TRUE: guarda os fits em memória (mais RAM)
 )
 
 tic("Total")

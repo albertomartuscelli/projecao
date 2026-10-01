@@ -22,10 +22,10 @@ de funções precisa estar no mesmo diretório de trabalho (ou ajuste o caminho)
 
 Responde duas perguntas para cada alvo (`med_agua`, `fat_agua`, `med_esg`, `fat_esg`):
 
-1. **Qual o melhor modelo?** SNAIVE, ETS e ARIMA com regressoras incrementais
+1. **Qual o melhor modelo?** SNAIVE (benchmark) e ARIMA com regressoras incrementais
    (temperatura, chuva, nível dos reservatórios, tarifa, CAGED).
-2. **Qual a melhor agregação?** `G1_original` (SP/Osasco/Guarulhos por ATC,
-   municípios A, clusters B/C por regional), `G2_superintendencia` e
+2. **Qual a melhor agregação?** `G1_municipioA_clusterBC` (municípios A
+   individuais, B/C agrupados por regional; SP/Osasco/Guarulhos por ATC), `G2_superintendencia` e
    `G3_municipio` (nível da chave).
 
 Como funciona:

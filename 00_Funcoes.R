@@ -74,8 +74,9 @@ regressoras = c("temp_med", "prec_tot", "lag_nv_sim", "tarifa", "caged")
 mun_atc = c("SAO PAULO", "OSASCO", "GUARULHOS")
 
 regras_agrupamento = list(
-  # SP/Osasco/Guarulhos por ATC, municípios A individuais, B/C por regional
-  G1_original = quo(case_when(municipio %in% mun_atc ~ paste0(municipio, "_", cd_atc),
+  # Municípios A individuais, B/C agrupados por regional (cluster);
+  # SP/Osasco/Guarulhos por ATC
+  G1_municipioA_clusterBC = quo(case_when(municipio %in% mun_atc ~ paste0(municipio, "_", cd_atc),
                               classificacao_abc == "A" ~ municipio,
                               T ~ paste0("cluster_", cd_regiao))),
   # Uma série por superintendência
@@ -87,9 +88,8 @@ regras_agrupamento = list(
 )
 
 modelos_candidatos = list(
-  # benchmarks
+  # benchmark
   snaive  = SNAIVE(log(consumo)),
-  ets     = ETS(log(consumo)),
   # candidatos
   arima_0 = ARIMA(log(consumo) ~ pdq(0:2, 0:1, 0:2) + PDQ(0:1, 0:1, 0:1)),
   arima_1 = ARIMA(log(consumo) ~ pdq(0:2, 0:1, 0:2) + PDQ(0:1, 0:1, 0:1) + log(temp_med)),
@@ -559,12 +559,21 @@ backtest_agrupamento = function(base_chave, agrup, cfg, ctx) {
   # FIT
   arq_fit = file.path(cfg$dir_saida, "modelos", glue("fit_{ctx$rotulo}_{agrup}.rds"))
 
-  if (cfg$reaproveitar_fit & file.exists(arq_fit)) {
-    fit_model = readRDS(arq_fit)
-  } else {
+  # O fit salvo só é reaproveitado se tiver todos os modelos candidatos atuais
+  fit_model = if (cfg$reaproveitar_fit & file.exists(arq_fit)) readRDS(arq_fit) else NULL
+
+  if (!is.null(fit_model) && !all(names(modelos_candidatos) %in% names(fit_model))) {
+    message("Fit salvo sem todos os modelos candidatos - reestimando.")
+    fit_model = NULL
+  }
+
+  if (is.null(fit_model)) {
     fit_model = ajusta_modelos(train, modelos_candidatos, cfg$n_workers)
     saveRDS(fit_model, arq_fit)
   }
+
+  fit_model = fit_model %>%
+    select(all_of(chaves_ts), all_of(names(modelos_candidatos)))
 
   # FORECAST: realizado (ex-post) + cenários ex-ante
   cenarios = c(list(realizado = new_data %>%
@@ -1253,6 +1262,13 @@ executa_backtest = function(base, alvo, cfg) {
                                         w = 16, h = 7))
 
   toc()
+
+  # Libera memória: os modelos ajustados ficam em /modelos. Com
+  # `manter_modelos = TRUE` o retorno guarda base, treino e fits de cada agrupamento.
+  if (!isTRUE(cfg$manter_modelos)) {
+    res = map(res, ~ .x[c("info_series")])
+  }
+  gc()
 
   list(res = res, fit_x_real = fit_x_real, acc = acc, ranking = ranking,
        decisao = decisao, tab_modelos = tab_modelos, tab_agregacao = tab_agregacao,

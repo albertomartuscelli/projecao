@@ -57,7 +57,7 @@ tratar_outliers = TRUE
 ## Agregação e modelo ----------------------------------------------------------
 # Lidos de 00_Decisao_<segmento>.xlsx (backtests). Sem o arquivo, vale o
 # padrão abaixo, que foi o vencedor no backtest de água medida residencial.
-escolha_padrao = list(agrupamento = "G1_original", modelo = "arima_2")
+escolha_padrao = list(agrupamento = "G1_municipioA_clusterBC", modelo = "arima_2")
 
 # Sobrepõe a decisão do backtest, se preenchido. Exemplo:
 #   add_row(segmento = "Nao_Residencial", alvo = "med_esg",
@@ -291,8 +291,11 @@ projeta_alvo = function(seg, alvo, agrup, modelo, ajuste_elasticidade) {
 
   toc()
 
+  rm(fit, base_ts, base_chave, hist)
+  gc()
+
   list(proj = proj, real = real, encerradas = encerradas,
-       resumo_exog = resumo_exog, anomalias = anomalias, fit = fit)
+       resumo_exog = resumo_exog, anomalias = anomalias)
 }
 
 resultados = escolhas %>%
