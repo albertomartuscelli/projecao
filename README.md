@@ -98,7 +98,7 @@ Pública):
    | `arima_0` a `arima_2` | consumo/economia | ARIMA com regressoras incrementais: temperatura, chuva |
    | `arima_3` | consumo/economia | `arima_2` + nível dos reservatórios (só com `usar_nivel_no_modelo = TRUE`) |
    | `arima_4` | consumo/economia | `arima_3` + tarifa (só com `usar_tarifa_no_modelo = TRUE`) |
-   | `arima_5` | consumo/economia | todas as regressoras ligadas: clima e CAGED (+ nível, + tarifa) |
+   | `arima_5` | consumo/economia | todas as regressoras ligadas: clima e CAGED (+ nível, + tarifa); sai se só houver clima |
    | `arima_2_D1` | consumo/economia | diferença sazonal forçada (segue o nível do ano anterior) |
    | `arima_5_d1_0` | consumo/economia | diferença simples forçada, sem constante (sem drift) |
    | `vol_arima_2`, `vol_arima_5`, `vol_arima_5_D1_0` | volume direto | mesmas regressoras, sem passar pelas economias |
@@ -257,6 +257,25 @@ Motivos:
 Com `TRUE`, volta a especificação anterior; `arima_2` × `arima_3` no backtest é o teste direto. A
 alternativa melhor para o efeito real é uma variável de intervenção nas séries da RMSP (1 nos meses com
 gestão de pressão ou restrição), com o cenário de manter ou retirar a medida em 2027.
+
+### CAGED: candidato, decidido no backtest
+
+Diferente da tarifa e do nível, o CAGED tem variação por município e um mecanismo plausível no não
+residencial (atividade econômica local). Por isso fica como candidato (`usar_caged_no_modelo = TRUE`): com
+tarifa e nível fora, `arima_5` × `arima_2` (e `vol_arima_5` × `vol_arima_2`) diferem só pelo CAGED, e a
+seleção por categoria decide. Cuidados:
+
+- **Dentro de cada série, o CAGED é quase uma tendência suave** (sem recessão em 2022–2026). O coeficiente
+  tende a capturar a tendência do consumo, não o ciclo econômico.
+- **Na projeção, vira tendência imposta**: o CAGED é extrapolado pelo crescimento dos últimos 12 meses
+  até dez/2027, e o efeito no consumo é coeficiente × esse crescimento. Se ficar, vale um cenário de
+  emprego externo (consultoria) no lugar da extrapolação.
+- **Ruído nos municípios pequenos** (empregos agrícolas sazonais com saltos de 50% a 90% no mês). Nas séries
+  agregadas o efeito dilui, porque o CAGED do grupo é a soma dos municípios.
+
+Critério para manter numa categoria: modelo com CAGED vence o sem CAGED por mais que a tolerância (WAPE,
+cenário `base`) **e** a elasticidade do CAGED (aba de elasticidades) tem sinal positivo e magnitude
+plausível (0 a 1) na maioria das séries. Sem isso, `usar_caged_no_modelo = FALSE`.
 
 ## Observações sobre os dados
 

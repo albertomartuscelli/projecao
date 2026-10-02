@@ -106,9 +106,18 @@ usar_tarifa_no_modelo = FALSE
 # arima_3 no backtest é o teste direto. Mudou? Rode os backtests de novo.
 usar_nivel_no_modelo = FALSE
 
+# CAGED (estoque de empregos do município/grupo) como regressora.
+# TRUE (padrão): fica como candidata. Com tarifa e nível fora, arima_5 x arima_2
+# (e vol_arima_5 x vol_arima_2) testam só o CAGED, e a seleção por categoria
+# decide. FALSE: arima_5 e vol_arima_5 saem (iguais aos *_2); os modelos *_d1_0
+# e *_D1_0 ficam só com clima.
+usar_caged_no_modelo = TRUE
+
 regs_clima = c("log(temp_med)", "log(prec_tot)")
 regs_nivel = c(regs_clima, if (usar_nivel_no_modelo) "lag_nv_sim")
-regs_todas = c(regs_nivel, if (usar_tarifa_no_modelo) "tarifa", "log(caged)")
+regs_todas = c(regs_nivel, if (usar_tarifa_no_modelo) "tarifa", if (usar_caged_no_modelo) "log(caged)")
+# arima_5 / vol_arima_5 só existem se tiverem algo além do clima
+tem_regs_extra = !identical(regs_todas, regs_clima)
 
 # ARIMA a partir de texto (ordens e regressoras). constante = FALSE -> "0 + ..."
 arima_def = function(resposta, regs = character(0), pdq = "pdq(0:2, 0:1, 0:2)",
@@ -133,11 +142,11 @@ modelos_catalogo = list(
   arima_2 = arima_def("log(consumo)", regs_clima),
   arima_3 = if (usar_nivel_no_modelo) arima_def("log(consumo)", regs_nivel),
   arima_4 = if (usar_tarifa_no_modelo) arima_def("log(consumo)", c(regs_nivel, "tarifa")),
-  arima_5 = arima_def("log(consumo)", regs_todas),
+  arima_5 = if (tem_regs_extra) arima_def("log(consumo)", regs_todas),
   arima_2_D1   = arima_def("log(consumo)", regs_clima, PDQ = "PDQ(0:1, 1, 0:1)"),
   arima_5_d1_0 = arima_def("log(consumo)", regs_todas, pdq = "pdq(0:2, 1, 0:2)", constante = FALSE),
   vol_arima_2  = arima_def("log(volume)", regs_clima),
-  vol_arima_5  = arima_def("log(volume)", regs_todas),
+  vol_arima_5  = if (tem_regs_extra) arima_def("log(volume)", regs_todas),
   vol_arima_5_D1_0 = arima_def("log(volume)", regs_todas, PDQ = "PDQ(0:1, 1, 0:1)", constante = FALSE)
 ) %>%
   compact()

@@ -223,7 +223,7 @@ le_decisao = function(seg) {
   dec = if (file.exists(arq)) {
     # A decisão só vale para a mesma especificação de regressoras dos modelos
     par = tryCatch(read_excel(arq, "parametros"), error = function(e) tibble(parametro = character()))
-    for (op in c("usar_tarifa_no_modelo", "usar_nivel_no_modelo")) {
+    for (op in c("usar_tarifa_no_modelo", "usar_nivel_no_modelo", "usar_caged_no_modelo")) {
       valor_bt = par$valor[par$parametro == op]
       if (!identical(valor_bt, as.character(get(op)))) {
         warning(glue("{basename(arq)}: backtest feito com outra especificação ",
