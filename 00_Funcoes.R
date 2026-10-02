@@ -257,17 +257,29 @@ prepara_chave = function(base, alvo, fim_limpeza,
 }
 
 # Picos de faturamento no teste (acerto de leitura, vazamento, refaturamento):
-# mês da chave com volume acima de `fator` x a mediana dos 12 últimos meses do
-# treino. O real é trocado pela mediana antes das métricas (a previsão não muda).
-corrige_picos_teste = function(base_chave, fim_treino, fator = 3) {
+# sequência de até `max_meses` meses da chave com volume acima de `fator` x a
+# mediana dos 12 últimos meses do treino e que volta ao normal dentro do teste.
+# Sequências longas ou que vão até o último mês são mudança de patamar (cliente
+# novo, ampliação) e ficam. No pico, o real vira a mediana antes das métricas
+# (a previsão não muda).
+corrige_picos_teste = function(base_chave, fim_treino, fator = 3, max_meses = 3) {
   ref = base_chave %>%
     filter(periodo <= as.Date(fim_treino), periodo > as.Date(fim_treino - 12)) %>%
     group_by(chave) %>%
     summarise(vol_ref = median(vol, na.rm = T), .groups = "drop")
 
+  ult_teste = max(base_chave$periodo)
+
   bc = base_chave %>%
     left_join(ref, by = "chave") %>%
-    mutate(pico = periodo > as.Date(fim_treino) & coalesce(vol_ref, 0) > 0 & vol > fator * vol_ref)
+    mutate(acima = periodo > as.Date(fim_treino) & coalesce(vol_ref, 0) > 0 & vol > fator * vol_ref) %>%
+    group_by(chave) %>%
+    arrange(periodo, .by_group = TRUE) %>%
+    mutate(bloco = cumsum(acima != lag(acima, default = FALSE))) %>%
+    group_by(chave, bloco) %>%
+    mutate(pico = acima & n() <= max_meses & max(periodo) < ult_teste) %>%
+    ungroup() %>%
+    select(-acima, -bloco)
 
   picos = bc %>%
     filter(pico) %>%
@@ -1346,9 +1358,9 @@ executa_backtest = function(base, alvo, cfg) {
   outliers = resumo_outliers(base_chave, as.Date(fim_treino))
 
   # Picos de faturamento no teste saem da avaliação (real -> mediana 12m da chave)
-  picos_teste = tibble()
+  picos_teste = tibble(chave = character(), periodo = as.Date(character()))
   if (isTRUE(cfg$corrigir_picos_teste)) {
-    cp = corrige_picos_teste(base_chave, fim_treino, cfg$fator_pico %||% 3)
+    cp = corrige_picos_teste(base_chave, fim_treino, cfg$fator_pico %||% 3, cfg$max_meses_pico %||% 3)
     base_chave = cp$base_chave
     picos_teste = cp$picos
     message(glue("Picos no teste: {nrow(picos_teste)} chave-mês | excesso removido: ",

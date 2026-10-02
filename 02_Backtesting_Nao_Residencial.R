@@ -47,10 +47,12 @@ cfg = list(
   limpar_economias = TRUE,
   alvo_real        = "bruto",               # bruto | ajustado
 
-  # Picos de faturamento no teste (mês da chave > fator_pico x mediana 12m do
-  # treino): o real volta à mediana antes das métricas. Lista na aba picos_teste.
+  # Picos de faturamento no teste: até max_meses_pico meses seguidos da chave
+  # acima de fator_pico x mediana 12m do treino, voltando ao normal depois. O
+  # real volta à mediana antes das métricas. Lista na aba picos_teste.
   corrigir_picos_teste = TRUE,
   fator_pico           = 3,
+  max_meses_pico       = 3,
 
   # Agrupamentos a testar (nomes de `regras_agrupamento`)
   # G3_municipio fica fora por desempenho (empatou com G1 a 4x o custo)
