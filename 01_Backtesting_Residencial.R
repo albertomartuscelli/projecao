@@ -56,9 +56,11 @@ cfg = list(
   # volume direto; snaive = benchmark (não é escolhido). Menos modelos = mais rápido.
   modelos = names(modelos_catalogo),
 
-  # Economias no teste para o consumo/economia: "projetadas" (ETS, como na
-  # projeção; comparação justa com o volume direto) | "reais"
-  economias_teste = "projetadas",
+  # Economias no teste: "reais" -> o erro medido é o de consumo/economia
+  # (por célula, erro % de volume = erro % de consumo); o volume direto é
+  # avaliado pelo consumo implícito (volume previsto / economias reais).
+  # "projetadas" -> erro de volume, somando o erro do ETS das economias.
+  economias_teste = "reais",
   economias_agrega_categorias = TRUE,     # ETS no total das categorias do grupo
 
   # Tarifa nos cenários ex-ante: realizada (reajuste conhecido) | constante

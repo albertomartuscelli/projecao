@@ -41,9 +41,11 @@ Pública):
 
 Como funciona:
 
-- Consumo/economia × **economias projetadas** (ETS) no teste, como na
-  projeção. Assim a comparação com o volume direto é justa
-  (`economias_teste = "reais"` isola só o modelo de consumo).
+- Medida principal: **erro de consumo (volume/economia)**. Com
+  `economias_teste = "reais"` (padrão), o volume previsto é consumo previsto ×
+  economias reais, então o erro % de cada célula é o erro % do consumo; os
+  modelos de volume direto são avaliados pelo consumo implícito. Com
+  `"projetadas"`, o erro inclui o do ETS das economias (erro de volume).
 - Outliers: `tsclean` no consumo só na janela de treino; a acurácia é medida
   contra o volume bruto. Mar+abr/2026 são avaliados como um bimestre.
 - Exógenas no teste: `realizado` (ex-post) e três cenários ex-ante
