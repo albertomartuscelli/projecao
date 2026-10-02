@@ -44,6 +44,9 @@
 -- MAGIC   cliente sair ou mudar de fonte, a série inteira se move nessa proporção.
 -- MAGIC - **`v_min`**: piso absoluto em m³/mês, para que séries pequenas não tornem "grandes" PDEs pequenos.
 -- MAGIC - **`min_meses_ref`**: ao menos 6 meses com fatura na janela (evita classificar PDEs recém-criados).
+-- MAGIC - **Janela jan–dez/2025**: a mesma classificação vale para o backtest (teste jan–ago/2026, sem
+-- MAGIC   sobreposição) e para a projeção. Usa a **mediana**, robusta a picos de faturamento (ex.: PDEs com
+-- MAGIC   ~1 milhão de m³ num único mês de 2025).
 -- MAGIC
 -- MAGIC Limiares **por categoria** (`params_porte`), calibrados no D4 (variação líquida jan–ago/2026 sobre
 -- MAGIC jan–ago/2025 de cada série superintendência × categoria):
@@ -56,11 +59,6 @@
 -- MAGIC Categorias fora de `params_porte` não separam porte (todos os PDEs = "Demais"): no Residencial os
 -- MAGIC grandes têm < 2% do volume e variam como os demais; no Comercial a variação está espalhada (em
 -- MAGIC nenhum limiar os grandes concentram a variação mais que o volume de forma relevante).
--- MAGIC - **Janela jan–dez/2025**: a mesma classificação vale para o backtest (teste jan–ago/2026, sem
--- MAGIC   sobreposição) e para a projeção. Usa a **mediana**, robusta a picos de faturamento (ex.: PDEs com
--- MAGIC   ~1 milhão de m³ num único mês de 2025).
--- MAGIC
--- MAGIC Calibre `share_min` e `v_min` com o diagnóstico **D4** antes de fixá-los.
 
 -- COMMAND ----------
 
@@ -421,9 +419,9 @@ LEFT JOIN  `sdb_sbx_adls`.`regulacao`.`gmm_cod_ibge` ibge      ON f.CD_ATC = ibg
 -- MAGIC | # | Pergunta | O que fazer com o resultado |
 -- MAGIC |---|---|---|
 -- MAGIC | D1 | Quantos PDE-mês têm mais de uma fatura (refaturamento)? | Se o % de volume for relevante, o volume medido e as economias estão duplicados nesses meses: falta uma regra de "fatura mais recente" |
+-- MAGIC | D1b/D1c | Os PDE-mês com mais de uma fatura são refaturamento ou períodos distintos? | Com estorno ou mesmo período repetido = medido duplicado |
 -- MAGIC | D2 | Quanto volume é descartado por `catego` NULL ou fora do de-para? | Códigos com volume relevante precisam de regra no `CASE` |
 -- MAGIC | D3 | Há ATC sem correspondência ou duplicada em `gmm_cod_ibge`? | Sem correspondência = superintendência NULL; duplicada = volume em dobro |
--- MAGIC | D1b | Os PDE-mês com mais de uma fatura são refaturamento ou períodos distintos? | Com estorno ou mesmo período repetido = medido duplicado |
 -- MAGIC | D4 | Calibração do critério de porte | Escolher `share_min` e `v_min` por categoria |
 -- MAGIC | D5 | Conferência com a tabela anterior | Diferenças esperadas: + Caminhão/Embarcação e + faturas antes descartadas |
 
