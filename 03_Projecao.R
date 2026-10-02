@@ -111,10 +111,11 @@ mes_reajuste     = as.Date("2027-04-01")  # 2026: vigência em jan, chegou às c
 ipca_aa          = 0.045                  # IPCA projetado (a.a.) - atualizar com o Focus
 
 ## Elasticidade-preço (consumo/economia x tarifa real) ---------------------------
-# Aplicada sobre a projeção quando o modelo NÃO tem tarifa (os vencedores do
-# backtest não têm). Modelos com tarifa (arima_4/5) já recebem a trajetória do
-# IRT como regressora e não recebem o ajuste, para não contar o efeito duas vezes.
-# Referência: medianas do backtest (arima_4/5) e o projeto elasticidade_tarifa.
+# Aplicada sobre a projeção quando o modelo NÃO tem tarifa (com
+# usar_tarifa_no_modelo = FALSE, nenhum tem). Com TRUE, os modelos com tarifa
+# (arima_4/5) recebem a trajetória do IRT como regressora e não recebem o
+# ajuste, para não contar o efeito duas vezes.
+# Referência: projeto elasticidade_tarifa (microdados).
 elasticidade_tarifa = c("Residencial Normal"            = -0.10,
                         "Residencial Social"            = -0.10,
                         "Residencial Social Vulnerável" = -0.10,
@@ -220,6 +221,14 @@ le_decisao = function(seg) {
   arq = segmentos[[seg]]$arq_decisao
 
   dec = if (file.exists(arq)) {
+    # A decisão só vale para a mesma especificação de tarifa dos modelos
+    par = tryCatch(read_excel(arq, "parametros"), error = function(e) tibble(parametro = character()))
+    tarifa_bt = par$valor[par$parametro == "usar_tarifa_no_modelo"]
+    if (!identical(tarifa_bt, as.character(usar_tarifa_no_modelo))) {
+      warning(glue("{basename(arq)}: backtest feito com outra especificação de tarifa ",
+                   "(usar_tarifa_no_modelo = {coalesce(tarifa_bt[1], 'não informado')}; agora {usar_tarifa_no_modelo}). ",
+                   "Rode o backtest de novo."), call. = FALSE)
+    }
     read_excel(arq, "decisao")
   } else {
     message(glue("Decisão não encontrada ({arq}) - usando padrão para {seg}."))

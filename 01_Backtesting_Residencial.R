@@ -25,6 +25,9 @@ cfg = list(
   segmento   = "Residencial",
   arq_base   = "05_FRAMEWORK_5/01_BASES/02_Base Analítica Ajustada_202201-202608.csv",
   categorias = "Residencial",
+  # Grandes clientes (coluna `porte` da base do Databricks): "somar" reproduz
+  # as séries de antes; "demais" testa o erro sem os grandes (só experimento)
+  porte      = "somar",
   dir_saida  = "05_FRAMEWORK_5/03_BACKTESTING/Residencial",
 
   # Alvos (definidos em `alvos_def`): med_agua | fat_agua | med_esg | fat_esg.
@@ -111,7 +114,7 @@ tic("Total")
 
 # 1. IMPORTAÇÃO ----------------------------------------------------------------
 
-base = carrega_base(cfg$arq_base, cfg$categorias)
+base = carrega_base(cfg$arq_base, cfg$categorias, cfg$porte)
 
 base %>%
   group_by(categoria_detalhe, recorte) %>%
@@ -157,8 +160,9 @@ write_xlsx(list(decisao = decisao,
                 melhor_modelo = melhor_modelo,
                 melhor_agregacao = melhor_agregacao,
                 elasticidade_geral = imap_dfr(bt, ~ mutate(.x$elasticidades$geral, alvo = .y, .before = 1)),
-                parametros = tibble(parametro = names(cfg),
-                                    valor = map_chr(cfg, ~ paste(format(unlist(.x)), collapse = ", ")))),
+                parametros = tibble(parametro = c(names(cfg), "usar_tarifa_no_modelo"),
+                                    valor = c(map_chr(cfg, ~ paste(format(unlist(.x)), collapse = ", ")),
+                                              as.character(usar_tarifa_no_modelo)))),
            file.path(cfg$dir_saida, glue("00_Decisao_{nome_arq(cfg$segmento)}.xlsx")))
 
 # Resultados leves (sem os modelos ajustados, que ficam em /modelos)

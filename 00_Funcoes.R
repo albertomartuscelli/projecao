@@ -87,26 +87,49 @@ regras_agrupamento = list(
                              municipio))
 )
 
+# Tarifa como regressora dos modelos.
+# FALSE (padrão): a tarifa sai dos modelos e o reajuste entra na projeção pela
+# elasticidade parametrizada (03_Projecao.R). Motivos (README, "Tarifa"): o IRT
+# é um índice único estadual com 4-5 degraus na amostra, sempre em transições
+# sazonais (maio; jan/2026), então o coeficiente do ARIMA não é identificado.
+# TRUE: volta a especificação anterior (arima_4 = arima_3 + tarifa), útil para
+# comparar arima_3 x arima_4 no backtest. Mudou? Rode os backtests de novo.
+usar_tarifa_no_modelo = FALSE
+
+regs_clima = c("log(temp_med)", "log(prec_tot)")
+regs_nivel = c(regs_clima, "lag_nv_sim")
+regs_todas = c(regs_nivel, if (usar_tarifa_no_modelo) "tarifa", "log(caged)")
+
+# ARIMA a partir de texto (ordens e regressoras). constante = FALSE -> "0 + ..."
+arima_def = function(resposta, regs = character(0), pdq = "pdq(0:2, 0:1, 0:2)",
+                     PDQ = "PDQ(0:1, 0:1, 0:1)", constante = TRUE) {
+  rhs = paste(c(if (!constante) "0", pdq, PDQ, regs), collapse = " + ")
+  ARIMA(!!as.formula(paste(resposta, "~", rhs), env = globalenv()))
+}
+
 # Catálogo de modelos. Cada backtest escolhe os seus em `cfg$modelos`.
-#   arima_k      : consumo/economia, ordens escolhidas automaticamente
+#   arima_0..3   : consumo/economia; regressoras incrementais (clima, nível)
+#   arima_4      : arima_3 + tarifa (só com usar_tarifa_no_modelo = TRUE)
+#   arima_5      : todas as regressoras (clima, nível, CAGED; + tarifa se TRUE)
 #   arima_2_D1   : diferença sazonal forçada (segue o nível do ano anterior)
 #   arima_5_d1_0 : diferença simples forçada, sem constante (sem drift)
 #   vol_*        : volume direto (sem passar pelas economias)
 #   snaive       : benchmark - aparece nas tabelas, mas não é escolhido
 modelos_catalogo = list(
   snaive  = SNAIVE(log(consumo)),
-  arima_0 = ARIMA(log(consumo) ~ pdq(0:2, 0:1, 0:2) + PDQ(0:1, 0:1, 0:1)),
-  arima_1 = ARIMA(log(consumo) ~ pdq(0:2, 0:1, 0:2) + PDQ(0:1, 0:1, 0:1) + log(temp_med)),
-  arima_2 = ARIMA(log(consumo) ~ pdq(0:2, 0:1, 0:2) + PDQ(0:1, 0:1, 0:1) + log(temp_med) + log(prec_tot)),
-  arima_3 = ARIMA(log(consumo) ~ pdq(0:2, 0:1, 0:2) + PDQ(0:1, 0:1, 0:1) + log(temp_med) + log(prec_tot) + lag_nv_sim),
-  arima_4 = ARIMA(log(consumo) ~ pdq(0:2, 0:1, 0:2) + PDQ(0:1, 0:1, 0:1) + log(temp_med) + log(prec_tot) + lag_nv_sim + tarifa),
-  arima_5 = ARIMA(log(consumo) ~ pdq(0:2, 0:1, 0:2) + PDQ(0:1, 0:1, 0:1) + log(temp_med) + log(prec_tot) + lag_nv_sim + tarifa + log(caged)),
-  arima_2_D1   = ARIMA(log(consumo) ~ pdq(0:2, 0:1, 0:2) + PDQ(0:1, 1, 0:1) + log(temp_med) + log(prec_tot)),
-  arima_5_d1_0 = ARIMA(log(consumo) ~ 0 + pdq(0:2, 1, 0:2) + PDQ(0:1, 0:1, 0:1) + log(temp_med) + log(prec_tot) + lag_nv_sim + tarifa + log(caged)),
-  vol_arima_2  = ARIMA(log(volume) ~ pdq(0:2, 0:1, 0:2) + PDQ(0:1, 0:1, 0:1) + log(temp_med) + log(prec_tot)),
-  vol_arima_5  = ARIMA(log(volume) ~ pdq(0:2, 0:1, 0:2) + PDQ(0:1, 0:1, 0:1) + log(temp_med) + log(prec_tot) + lag_nv_sim + tarifa + log(caged)),
-  vol_arima_5_D1_0 = ARIMA(log(volume) ~ 0 + pdq(0:2, 0:1, 0:2) + PDQ(0:1, 1, 0:1) + log(temp_med) + log(prec_tot) + lag_nv_sim + tarifa + log(caged))
-)
+  arima_0 = arima_def("log(consumo)"),
+  arima_1 = arima_def("log(consumo)", "log(temp_med)"),
+  arima_2 = arima_def("log(consumo)", regs_clima),
+  arima_3 = arima_def("log(consumo)", regs_nivel),
+  arima_4 = if (usar_tarifa_no_modelo) arima_def("log(consumo)", c(regs_nivel, "tarifa")),
+  arima_5 = arima_def("log(consumo)", regs_todas),
+  arima_2_D1   = arima_def("log(consumo)", regs_clima, PDQ = "PDQ(0:1, 1, 0:1)"),
+  arima_5_d1_0 = arima_def("log(consumo)", regs_todas, pdq = "pdq(0:2, 1, 0:2)", constante = FALSE),
+  vol_arima_2  = arima_def("log(volume)", regs_clima),
+  vol_arima_5  = arima_def("log(volume)", regs_todas),
+  vol_arima_5_D1_0 = arima_def("log(volume)", regs_todas, PDQ = "PDQ(0:1, 1, 0:1)", constante = FALSE)
+) %>%
+  compact()
 
 # Modelos que não podem ser escolhidos (só referência)
 modelos_benchmark = "snaive"
@@ -151,10 +174,38 @@ filtra_chaves = function(df, chaves_df) {
 
 # 1. IMPORTAÇÃO E ETL ----------------------------------------------------------
 
-carrega_base = function(arq, categorias) {
+# Junta as linhas de porte de cada série x mês: soma volumes, economias e
+# contagens; as demais colunas (covariáveis) são iguais entre os portes
+soma_porte = function(dt) {
+  dt = as.data.table(dt)
+  chaves = intersect(c("cd_regiao", "municipio", "cd_ibge", "cd_atc", "categoria",
+                       "categoria_detalhe", "recorte", "classificacao_abc", "chave", "periodo"),
+                     names(dt))
+  soma = grep("^(vol_|n_economias|n_ligacoes|qt_dias|qtd_registros)", names(dt), value = TRUE)
+  outras = setdiff(names(dt), c(chaves, soma, "porte"))
+  soma_na = function(x) if (all(is.na(x))) NA_real_ else as.numeric(sum(x, na.rm = TRUE))
 
-  base = fread(arq, encoding = "UTF-8") %>%
-    as_tibble()
+  merge(dt[, lapply(.SD, soma_na), by = chaves, .SDcols = soma],
+        dt[, lapply(.SD, data.table::first), by = chaves, .SDcols = outras],
+        by = chaves)
+}
+
+# porte (base do Databricks com a coluna `porte`):
+#   "somar"  : Grande + Demais na mesma série (= séries de antes da separação)
+#   "demais" : só os Demais (experimento: erro do backtest sem os grandes
+#              clientes; não use na projeção, que perderia o volume deles)
+carrega_base = function(arq, categorias, porte = c("somar", "demais")) {
+
+  porte = match.arg(porte)
+
+  base = fread(arq, encoding = "UTF-8")
+
+  if ("porte" %in% names(base)) {
+    if (porte == "demais") base = base[porte == "Demais"]
+    base = soma_porte(base)
+  }
+
+  base = as_tibble(base)
 
   # Compatibilidade: tarifa pode vir como irt_real
   if ("irt_real" %in% names(base) & !"tarifa" %in% names(base)) {
@@ -606,11 +657,13 @@ monta_fallback = function(base_ts, grade, fim_hist) {
     select(all_of(chaves_ts), periodo, consumo_fb)
 }
 
-# Resumo numérico do treino: muda se a base ou o tratamento de outliers mudar
-assinatura_treino = function(train) {
+# Resumo do treino e das fórmulas: muda se a base, o tratamento de outliers ou
+# a especificação dos modelos (ex.: usar_tarifa_no_modelo) mudar
+assinatura_treino = function(train, modelos) {
   num = as_tibble(train) %>% select(where(is.numeric))
-  c(linhas = nrow(num), series = n_distinct(as_tibble(train)[chaves_ts]),
-    soma = signif(sum(abs(as.matrix(num)), na.rm = TRUE), 12))
+  list(dados = c(linhas = nrow(num), series = n_distinct(as_tibble(train)[chaves_ts]),
+                 soma = signif(sum(abs(as.matrix(num)), na.rm = TRUE), 12)),
+       modelos = map_chr(modelos_catalogo[modelos], ~ paste(deparse(.x$formula), collapse = "")))
 }
 
 # Backtest de um agrupamento: base, fit, forecast por cenário e fallback
@@ -651,7 +704,7 @@ backtest_agrupamento = function(base_chave, agrup, cfg, ctx) {
   }
 
   # O fit salvo também só vale para os mesmos dados de treino (base, outliers)
-  assinatura = assinatura_treino(train)
+  assinatura = assinatura_treino(train, modelos)
   if (!is.null(fit_model) && !identical(attr(fit_model, "assinatura"), assinatura)) {
     message("Fit salvo com outros dados de treino - reestimando.")
     fit_model = NULL
