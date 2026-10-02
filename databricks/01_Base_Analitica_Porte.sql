@@ -40,11 +40,22 @@
 -- MAGIC Um PDE é **Grande** quando o seu comportamento individual mexe na série que modelamos
 -- MAGIC (superintendência × categoria_detalhe, nível do agrupamento G2):
 -- MAGIC
--- MAGIC - **`share_min`**: a mediana do volume medido mensal do PDE é ao menos 0,5% da série. Se o cliente
--- MAGIC   sair ou mudar de fonte, a série inteira se move ≥ 0,5%; algumas saídas desse porte explicam o viés
--- MAGIC   de nível (~3%) visto no não residencial em 2026.
--- MAGIC - **`v_min`**: piso absoluto de 500 m³/mês, para que séries pequenas não tornem "grandes" PDEs pequenos.
+-- MAGIC - **`share_min`**: a mediana do volume medido mensal do PDE é ao menos essa fração da série. Se o
+-- MAGIC   cliente sair ou mudar de fonte, a série inteira se move nessa proporção.
+-- MAGIC - **`v_min`**: piso absoluto em m³/mês, para que séries pequenas não tornem "grandes" PDEs pequenos.
 -- MAGIC - **`min_meses_ref`**: ao menos 6 meses com fatura na janela (evita classificar PDEs recém-criados).
+-- MAGIC
+-- MAGIC Limiares **por categoria** (`params_porte`), calibrados no D4 (variação líquida jan–ago/2026 sobre
+-- MAGIC jan–ago/2025 de cada série superintendência × categoria):
+-- MAGIC
+-- MAGIC | Categoria | share_min | v_min | % volume grandes | % variação grandes | var. grandes × demais |
+-- MAGIC |---|---|---|---|---|---|
+-- MAGIC | Industrial | 0,05% | 5.000 | 12,3% | 23,5% | 13,6% × 6,2% |
+-- MAGIC | Pública | 0,1% | 1.000 | 32,1% | 63,3% | 11,3% × 3,1% |
+-- MAGIC
+-- MAGIC Categorias fora de `params_porte` não separam porte (todos os PDEs = "Demais"): no Residencial os
+-- MAGIC grandes têm < 2% do volume e variam como os demais; no Comercial a variação está espalhada (em
+-- MAGIC nenhum limiar os grandes concentram a variação mais que o volume de forma relevante).
 -- MAGIC - **Janela jan–dez/2025**: a mesma classificação vale para o backtest (teste jan–ago/2026, sem
 -- MAGIC   sobreposição) e para a projeção. Usa a **mediana**, robusta a picos de faturamento (ex.: PDEs com
 -- MAGIC   ~1 milhão de m³ num único mês de 2025).
@@ -57,9 +68,16 @@ CREATE OR REPLACE TEMP VIEW params AS
 SELECT
   202501 AS ref_ini,        -- início da janela de referência (AAAAMM)
   202512 AS ref_fim,        -- fim da janela de referência (AAAAMM)
-  0.005  AS share_min,      -- mediana do PDE >= 0,5% da série superintendência x categoria
-  500    AS v_min,          -- e >= 500 m³/mês
   6      AS min_meses_ref;  -- meses mínimos com fatura na janela
+
+-- COMMAND ----------
+
+-- Limiares por categoria_detalhe (categorias ausentes: sem separação de porte)
+CREATE OR REPLACE TEMP VIEW params_porte AS
+SELECT * FROM VALUES
+  ('Industrial', 0.0005, 5000),   -- mediana >= 0,05% da série e >= 5.000 m³/mês
+  ('Pública',    0.0010, 1000)    -- mediana >= 0,1% da série e >= 1.000 m³/mês
+AS t(CATEGORIA_DETALHE, share_min, v_min);
 
 -- COMMAND ----------
 
@@ -234,7 +252,7 @@ GROUP BY ID_PDE, catego, cod_ITEM_FAT, CD_ATC, TP_RECORTE, ANO, MES;
 -- MAGIC    Residencial, Comercial, Industrial e Pública. Demanda firme (contratos) e "Outras" ficam fora.
 -- MAGIC 2. **`ref`**: mediana, máximo e número de meses de cada PDE.
 -- MAGIC 3. **`serie`**: volume da série de referência (superintendência × categoria_detalhe) = soma das medianas.
--- MAGIC 4. **`classif`**: aplica os três critérios da etapa 0.
+-- MAGIC 4. **`classif`**: aplica os critérios da etapa 0 (limiares da categoria em `params_porte`).
 -- MAGIC 5. PDE que mudou de categoria na janela: vale a categoria de maior volume. A classificação é **fixa**
 -- MAGIC    por PDE e vale para todo o histórico, para a composição dos segmentos não mudar mês a mês.
 -- MAGIC
@@ -280,12 +298,13 @@ serie AS (
 classif AS (
   SELECT r.*, s.vol_serie_ref,
          r.vol_mediana_ref / s.vol_serie_ref AS share_serie,
-         CASE WHEN r.vol_mediana_ref / s.vol_serie_ref >= p.share_min
-               AND r.vol_mediana_ref >= p.v_min
+         CASE WHEN r.vol_mediana_ref / s.vol_serie_ref >= pp.share_min
+               AND r.vol_mediana_ref >= pp.v_min
                AND r.meses_ref >= p.min_meses_ref
-              THEN 'Grande' ELSE 'Demais' END AS porte
+              THEN 'Grande' ELSE 'Demais' END AS porte   -- sem limiar (NULL) -> Demais
   FROM ref r
   JOIN serie s USING (CATEGORIA_DETALHE, SG_SUPERINTENDENCIA)
+  LEFT JOIN params_porte pp USING (CATEGORIA_DETALHE)
   CROSS JOIN params p
 )
 
@@ -404,7 +423,8 @@ LEFT JOIN  `sdb_sbx_adls`.`regulacao`.`gmm_cod_ibge` ibge      ON f.CD_ATC = ibg
 -- MAGIC | D1 | Quantos PDE-mês têm mais de uma fatura (refaturamento)? | Se o % de volume for relevante, o volume medido e as economias estão duplicados nesses meses: falta uma regra de "fatura mais recente" |
 -- MAGIC | D2 | Quanto volume é descartado por `catego` NULL ou fora do de-para? | Códigos com volume relevante precisam de regra no `CASE` |
 -- MAGIC | D3 | Há ATC sem correspondência ou duplicada em `gmm_cod_ibge`? | Sem correspondência = superintendência NULL; duplicada = volume em dobro |
--- MAGIC | D4 | Calibração do critério de porte | Escolher `share_min` e `v_min` |
+-- MAGIC | D1b | Os PDE-mês com mais de uma fatura são refaturamento ou períodos distintos? | Com estorno ou mesmo período repetido = medido duplicado |
+-- MAGIC | D4 | Calibração do critério de porte | Escolher `share_min` e `v_min` por categoria |
 -- MAGIC | D5 | Conferência com a tabela anterior | Diferenças esperadas: + Caminhão/Embarcação e + faturas antes descartadas |
 
 -- COMMAND ----------
@@ -417,6 +437,98 @@ SELECT ANO, MES,
 FROM `sdb_sbx_adls`.`regulacao`.`gmm_projecao_fato_pde_mes`
 GROUP BY ANO, MES
 ORDER BY ANO, MES;
+
+-- COMMAND ----------
+
+-- MAGIC %md
+-- MAGIC ### D1b — Tipo dos PDE-mês com mais de uma fatura
+-- MAGIC
+-- MAGIC Mesma deduplicação da etapa 1 (`DISTINCT` nas mesmas colunas), uma linha por PDE-mês:
+-- MAGIC
+-- MAGIC 1. **com estorno**: alguma fatura com faturado negativo (refaturamento: original + estorno + nova).
+-- MAGIC 2. **mesmo período repetido**: soma dos dias ≤ 1,2 × maior período (faturas do mesmo consumo).
+-- MAGIC 3. **períodos complementares**: soma dos dias entre 25 e 40 (mês dividido em duas leituras, legítimo).
+-- MAGIC 4. **mais de 40 dias**: leitura atrasada acumulada (volume real, concentrado no mês).
+-- MAGIC
+-- MAGIC `vol_med_soma` é o que a base usa hoje; `vol_med_ultima` é o medido só da fatura mais recente
+-- MAGIC (sem estorno). Nos tipos 1 e 2, a diferença entre os dois é o volume duplicado.
+
+-- COMMAND ----------
+
+WITH multi AS (
+  SELECT DISTINCT ID_PDE, ANO, MES
+  FROM `sdb_sbx_adls`.`regulacao`.`gmm_projecao_fato_pde_mes`
+  WHERE qtd_registros > 1
+),
+ho AS (
+  SELECT DISTINCT
+    h.ID_PDE, h.ID_FORNECIMENTO, h.DT_EMISSAO_FATURA, h.ANO, h.MES, h.CD_ATC,
+    h.TP_BENEFICIO, h.CD_PRODUTO, h.CD_CLASSE_FORNECIMENTO, h.CD_CATEGORIA_USO,
+    COALESCE(h.CD_ITEM_FATURAVEL_AGUA, '-1') AS CD_ITEM_FATURAVEL_AGUA,
+    COALESCE(h.CD_ITEM_FATURAVEL_ESG,  '-1') AS CD_ITEM_FATURAVEL_ESG,
+    h.NR_ECONOMIAS, h.QT_DIAS,
+    h.QT_CONS_MED_REG_AGUA, h.QT_CONS_MED_REG_ESG, h.QT_CONS_MED_REG_END,
+    h.QT_CONS_FAT_AGUA_POS, h.QT_CONS_FAT_AGUA_NEG,
+    h.QT_CONS_FAT_ESG_POS,  h.QT_CONS_FAT_ESG_NEG,
+    h.QT_CONS_FAT_END_POS,  h.QT_CONS_FAT_END_NEG
+  FROM `prd_raw_adls`.`bicom_ora_dm_regulatoria`.`mov_histograma_origem` h
+  INNER JOIN multi m ON h.ID_PDE = m.ID_PDE AND h.ANO = m.ANO AND h.MES = m.MES
+  WHERE h.ST_PROCESSAM = 'S'
+),
+fat AS (
+  SELECT *, QT_CONS_FAT_AGUA_POS + QT_CONS_FAT_AGUA_NEG AS vol_fat,
+         ROW_NUMBER() OVER (PARTITION BY ID_PDE, ANO, MES
+                            ORDER BY CASE WHEN QT_CONS_FAT_AGUA_POS + QT_CONS_FAT_AGUA_NEG < 0 THEN 1 ELSE 0 END,
+                                     DT_EMISSAO_FATURA DESC) AS ordem
+  FROM ho
+),
+resumo AS (
+  SELECT ID_PDE, ANO, MES,
+         COUNT(*)                                            AS n_faturas,
+         SUM(QT_DIAS)                                        AS dias_total,
+         MAX(QT_DIAS)                                        AS dias_max,
+         SUM(QT_CONS_MED_REG_AGUA)                           AS vol_med_soma,
+         MAX(CASE WHEN ordem = 1 THEN QT_CONS_MED_REG_AGUA END) AS vol_med_ultima,
+         SUM(vol_fat)                                        AS vol_fat,
+         SUM(QT_CONS_FAT_AGUA_NEG)                           AS vol_fat_neg,
+         COUNT_IF(vol_fat < 0 OR QT_CONS_FAT_AGUA_NEG < 0)   AS n_estornos
+  FROM fat
+  GROUP BY 1, 2, 3
+)
+SELECT
+  CASE WHEN n_estornos > 0               THEN '1. com estorno (refaturamento)'
+       WHEN dias_total <= dias_max * 1.2 THEN '2. mesmo período repetido'
+       WHEN dias_total BETWEEN 25 AND 40 THEN '3. períodos complementares (~1 mês)'
+       ELSE                                   '4. períodos somando > 40 dias' END AS tipo,
+  COUNT(*)            AS pde_mes,
+  SUM(n_faturas)      AS faturas,
+  SUM(vol_med_soma)   AS vol_med_soma,
+  SUM(vol_med_ultima) AS vol_med_ultima,
+  SUM(vol_fat)        AS vol_fat,
+  SUM(vol_fat_neg)    AS vol_fat_neg
+FROM resumo
+GROUP BY 1
+ORDER BY 1;
+
+-- COMMAND ----------
+
+-- D1c. Os 30 PDE-mês com maior volume medido entre os de mais de uma fatura (fatura a fatura)
+WITH top AS (
+  SELECT ID_PDE, ANO, MES, SUM(vol_med_agua) AS vol_med_agua
+  FROM `sdb_sbx_adls`.`regulacao`.`gmm_projecao_fato_pde_mes`
+  WHERE qtd_registros > 1
+  GROUP BY 1, 2, 3
+  ORDER BY vol_med_agua DESC
+  LIMIT 30
+)
+SELECT DISTINCT t.vol_med_agua AS vol_med_pde_mes, h.ID_PDE, h.ANO, h.MES, h.CD_ATC, h.ID_FORNECIMENTO,
+       h.DT_EMISSAO_FATURA, h.QT_DIAS, h.NR_ECONOMIAS, h.QT_CONS_MED_REG_AGUA,
+       h.QT_CONS_FAT_AGUA_POS, h.QT_CONS_FAT_AGUA_NEG
+FROM top t
+INNER JOIN `prd_raw_adls`.`bicom_ora_dm_regulatoria`.`mov_histograma_origem` h
+  ON h.ID_PDE = t.ID_PDE AND h.ANO = t.ANO AND h.MES = t.MES
+WHERE h.ST_PROCESSAM = 'S'
+ORDER BY vol_med_pde_mes DESC, h.ID_PDE, h.DT_EMISSAO_FATURA;
 
 -- COMMAND ----------
 
@@ -446,72 +558,61 @@ HAVING COUNT(*) > 1;
 -- MAGIC ### D4 — Calibração do critério de porte
 -- MAGIC
 -- MAGIC Testa uma grade de `share_min` × `v_min`. Os PDEs são classificados com 2025 e avaliados pela
--- MAGIC variação de jan–ago/2026 sobre jan–ago/2025, ou seja, **fora da amostra**: o critério consegue
--- MAGIC identificar com antecedência quem vai mexer na série?
+-- MAGIC variação de jan–ago/2026 sobre jan–ago/2025, ou seja, **fora da amostra**.
 -- MAGIC
--- MAGIC - `perc_volume`: participação dos grandes no volume da categoria.
--- MAGIC - `perc_variacao_abs`: participação dos grandes na soma das variações absolutas por PDE.
--- MAGIC - `indice_concentracao` = `perc_variacao_abs / perc_volume`.
+-- MAGIC A variação é medida **por série** (superintendência × categoria), líquida dentro de cada grupo:
+-- MAGIC somar |Δ| PDE a PDE inflaria os pequenos, cujas entradas e saídas se cancelam no agregado.
 -- MAGIC
--- MAGIC **Como escolher:** por categoria, a combinação com poucos PDEs (dezenas a poucas centenas) e
--- MAGIC `indice_concentracao` acima de 2. Perto de 1, o critério está pegando clientes comuns, que o modelo
--- MAGIC já trata bem.
+-- MAGIC - `perc_volume_grandes`: participação dos grandes no volume de jan–ago/2025.
+-- MAGIC - `var_abs_grandes` / `var_abs_demais`: soma de |Δ| das séries do grupo ÷ volume do grupo (%).
+-- MAGIC - `perc_var_grandes`: participação dos grandes na soma de |Δ| das séries.
+-- MAGIC
+-- MAGIC **Como escolher:** `var_abs_grandes` bem acima de `var_abs_demais` e `perc_var_grandes` bem acima
+-- MAGIC de `perc_volume_grandes`. Se nenhuma combinação faz isso, a categoria não separa porte.
 
 -- COMMAND ----------
 
 WITH base AS (
-  SELECT f.ID_PDE, dp.CATEGORIA_DETALHE, ibge.SG_SUPERINTENDENCIA,
-         f.ANO * 100 + f.MES AS anomes, SUM(f.vol_med_agua) AS vol
+  SELECT f.ID_PDE, dp.CATEGORIA_DETALHE, ibge.SG_SUPERINTENDENCIA, f.ANO, SUM(f.vol_med_agua) AS vol
   FROM `sdb_sbx_adls`.`regulacao`.`gmm_projecao_fato_pde_mes` f
   INNER JOIN `sdb_sbx_adls`.`regulacao`.`gmm_de_para_catego` dp ON f.catego = dp.catego
   LEFT JOIN  `sdb_sbx_adls`.`regulacao`.`gmm_cod_ibge` ibge      ON f.CD_ATC = ibge.CD_ATC
   WHERE dp.CATEGORIA IN ('Residencial', 'Comercial', 'Industrial', 'Pública')
     AND dp.CATEGORIA_DETALHE NOT LIKE '%DF%'
+    AND f.MES <= 8 AND f.ANO IN (2025, 2026)
   GROUP BY 1, 2, 3, 4
 ),
-ref AS (
+pde AS (
   SELECT ID_PDE, CATEGORIA_DETALHE, SG_SUPERINTENDENCIA,
-         PERCENTILE(vol, 0.5) AS v, COUNT(*) AS meses
+         SUM(CASE WHEN ANO = 2025 THEN vol ELSE 0 END) AS v25,
+         SUM(CASE WHEN ANO = 2026 THEN vol ELSE 0 END) AS v26
   FROM base
-  WHERE anomes BETWEEN 202501 AND 202512
   GROUP BY 1, 2, 3
 ),
-serie AS (
-  SELECT CATEGORIA_DETALHE, SG_SUPERINTENDENCIA, SUM(v) AS V
-  FROM ref
-  GROUP BY 1, 2
-),
-yoy AS (
-  SELECT ID_PDE, CATEGORIA_DETALHE,
-         SUM(CASE WHEN anomes BETWEEN 202601 AND 202608 THEN vol ELSE 0 END)
-       - SUM(CASE WHEN anomes BETWEEN 202501 AND 202508 THEN vol ELSE 0 END) AS delta
-  FROM base
-  GROUP BY 1, 2
-),
-pde AS (
-  SELECT r.*, r.v / s.V AS share, COALESCE(y.delta, 0) AS delta
-  FROM ref r
-  JOIN serie s USING (CATEGORIA_DETALHE, SG_SUPERINTENDENCIA)
-  LEFT JOIN yoy y USING (ID_PDE, CATEGORIA_DETALHE)
+ref AS (
+  SELECT ID_PDE, CATEGORIA_DETALHE, SG_SUPERINTENDENCIA, share_serie, vol_mediana_ref, meses_ref
+  FROM `sdb_sbx_adls`.`regulacao`.`gmm_projecao_porte_pde`
 ),
 grade AS (
-  SELECT * FROM VALUES (0.0010), (0.0025), (0.0050), (0.0100), (0.0200) AS s(share_min)
-  CROSS JOIN (SELECT * FROM VALUES (100), (500), (1000), (5000) AS m(v_min))
+  SELECT * FROM VALUES (0.0005), (0.0010), (0.0025), (0.0050), (0.0100) AS s(share_min)
+  CROSS JOIN (SELECT * FROM VALUES (500), (1000), (5000) AS m(v_min))
 ),
-marcado AS (
-  SELECT p.*, g.share_min, g.v_min,
-         (p.share >= g.share_min AND p.v >= g.v_min AND p.meses >= 6) AS grande
-  FROM pde p CROSS JOIN grade g
+serie AS (
+  SELECT p.CATEGORIA_DETALHE, p.SG_SUPERINTENDENCIA, g.share_min, g.v_min,
+         (COALESCE(r.share_serie, 0) >= g.share_min AND COALESCE(r.vol_mediana_ref, 0) >= g.v_min
+          AND COALESCE(r.meses_ref, 0) >= 6) AS grande,
+         SUM(p.v25) AS v25, SUM(p.v26) AS v26
+  FROM pde p
+  LEFT JOIN ref r USING (ID_PDE, CATEGORIA_DETALHE, SG_SUPERINTENDENCIA)
+  CROSS JOIN grade g
+  GROUP BY 1, 2, 3, 4, 5
 )
-SELECT
-  CATEGORIA_DETALHE, share_min, v_min,
-  COUNT_IF(grande)                                                                  AS n_grandes,
-  ROUND(100 * COUNT_IF(grande) / COUNT(*), 3)                                       AS perc_pdes,
-  ROUND(100 * SUM(CASE WHEN grande THEN v ELSE 0 END) / SUM(v), 1)                  AS perc_volume,
-  ROUND(100 * SUM(CASE WHEN grande THEN ABS(delta) ELSE 0 END) / SUM(ABS(delta)), 1) AS perc_variacao_abs,
-  ROUND((SUM(CASE WHEN grande THEN ABS(delta) ELSE 0 END) / SUM(ABS(delta)))
-        / NULLIF(SUM(CASE WHEN grande THEN v ELSE 0 END) / SUM(v), 0), 2)           AS indice_concentracao
-FROM marcado
+SELECT CATEGORIA_DETALHE, share_min, v_min,
+       ROUND(100 * SUM(CASE WHEN grande THEN v25 END) / SUM(v25), 1)                                         AS perc_volume_grandes,
+       ROUND(100 * SUM(CASE WHEN grande THEN ABS(v26 - v25) END) / SUM(CASE WHEN grande THEN v25 END), 2)     AS var_abs_grandes,
+       ROUND(100 * SUM(CASE WHEN NOT grande THEN ABS(v26 - v25) END) / SUM(CASE WHEN NOT grande THEN v25 END), 2) AS var_abs_demais,
+       ROUND(100 * SUM(CASE WHEN grande THEN ABS(v26 - v25) END) / SUM(ABS(v26 - v25)), 1)                   AS perc_var_grandes
+FROM serie
 GROUP BY 1, 2, 3
 ORDER BY 1, 2, 3;
 
