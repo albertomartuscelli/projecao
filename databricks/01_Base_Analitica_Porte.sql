@@ -5,6 +5,9 @@
 -- MAGIC Gera a base mensal por **categoria × ATC × recorte × porte** usada no backtesting e na projeção
 -- MAGIC (`05_FRAMEWORK_5`), separando os **grandes clientes** para que sejam projetados à parte.
 -- MAGIC
+-- MAGIC É o 1º de três notebooks: depois vêm `02_Covariaveis` (covariáveis das APIs) e `03_Base_Analitica_Final`
+-- MAGIC (ajustes, covariáveis e exportação do CSV). Rotina e detalhes em `databricks/README.md`.
+-- MAGIC
 -- MAGIC | Etapa | Tabela gerada | Conteúdo |
 -- MAGIC |---|---|---|
 -- MAGIC | 0 | `params` (temp view) | Parâmetros da classificação de porte |
