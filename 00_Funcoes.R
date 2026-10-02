@@ -256,6 +256,32 @@ prepara_chave = function(base, alvo, fim_limpeza,
     select(-preenchido, -janela)
 }
 
+# Picos de faturamento no teste (acerto de leitura, vazamento, refaturamento):
+# mês da chave com volume acima de `fator` x a mediana dos 12 últimos meses do
+# treino. O real é trocado pela mediana antes das métricas (a previsão não muda).
+corrige_picos_teste = function(base_chave, fim_treino, fator = 3) {
+  ref = base_chave %>%
+    filter(periodo <= as.Date(fim_treino), periodo > as.Date(fim_treino - 12)) %>%
+    group_by(chave) %>%
+    summarise(vol_ref = median(vol, na.rm = T), .groups = "drop")
+
+  bc = base_chave %>%
+    left_join(ref, by = "chave") %>%
+    mutate(pico = periodo > as.Date(fim_treino) & coalesce(vol_ref, 0) > 0 & vol > fator * vol_ref)
+
+  picos = bc %>%
+    filter(pico) %>%
+    transmute(chave, cd_regiao_adj, categoria_detalhe, recorte, periodo,
+              vol_original = vol, vol_mediana_12m = vol_ref, razao = vol/vol_ref,
+              excesso = vol - vol_ref)
+
+  list(base_chave = bc %>%
+         mutate(vol = if_else(pico, vol_ref, vol),
+                vol_ajust = if_else(pico, vol_ref, vol_ajust)) %>%
+         select(-vol_ref, -pico),
+       picos = picos)
+}
+
 resumo_outliers = function(base_chave, fim_limpeza) {
   base_chave %>%
     mutate(janela = if_else(periodo <= fim_limpeza, "treino", "teste/projecao")) %>%
@@ -1318,6 +1344,17 @@ executa_backtest = function(base, alvo, cfg) {
                              cfg$tratar_outliers, cfg$limpar_economias)
 
   outliers = resumo_outliers(base_chave, as.Date(fim_treino))
+
+  # Picos de faturamento no teste saem da avaliação (real -> mediana 12m da chave)
+  picos_teste = tibble()
+  if (isTRUE(cfg$corrigir_picos_teste)) {
+    cp = corrige_picos_teste(base_chave, fim_treino, cfg$fator_pico %||% 3)
+    base_chave = cp$base_chave
+    picos_teste = cp$picos
+    message(glue("Picos no teste: {nrow(picos_teste)} chave-mês | excesso removido: ",
+                 "{number(sum(picos_teste$excesso), big.mark = '.')} m³ ",
+                 "({percent(sum(picos_teste$excesso)/sum(base_chave$vol[base_chave$periodo > as.Date(fim_treino)], na.rm = T), 0.01)} do volume do teste)"))
+  }
   g_outlier = graf_outliers(base_chave, glue("{cfg$segmento} - {alvo}"))
 
   ## Fit e forecast por agrupamento --------------------------------------------
@@ -1536,7 +1573,8 @@ executa_backtest = function(base, alvo, cfg) {
       list(acc_detalhe_superint = acc_detalhe_superint,
            series = series,
            fallback = resumo_fallback,
-           outliers = outliers)),
+           outliers = outliers,
+           picos_teste = picos_teste %>% mutate(periodo = as.Date(periodo)))),
     file.path(cfg$dir_saida, glue("01_Acuracia_{rotulo}.xlsx")))
 
   write_xlsx(
