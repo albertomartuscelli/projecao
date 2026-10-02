@@ -254,7 +254,9 @@ GROUP BY ID_PDE, catego, cod_ITEM_FAT, CD_ATC, TP_RECORTE, ANO, MES;
 -- MAGIC 5. PDE que mudou de categoria na janela: vale a categoria de maior volume. A classificação é **fixa**
 -- MAGIC    por PDE e vale para todo o histórico, para a composição dos segmentos não mudar mês a mês.
 -- MAGIC
--- MAGIC PDEs sem fatura na janela (novos em 2026) ficam como "Demais" na etapa 3.
+-- MAGIC PDEs sem fatura na janela (novos em 2026) ficam como "Demais" na etapa 3. O `ID_PDE = '-1'` (faturas
+-- MAGIC sem PDE, milhares de fornecimentos de várias ATCs somados) fica fora: somado, parecia um único cliente
+-- MAGIC enorme.
 
 -- COMMAND ----------
 
@@ -272,6 +274,7 @@ vol_mes AS (
   WHERE dp.CATEGORIA IN ('Residencial', 'Comercial', 'Industrial', 'Pública')
     AND dp.CATEGORIA_DETALHE NOT LIKE '%DF%'
     AND f.ANO * 100 + f.MES BETWEEN p.ref_ini AND p.ref_fim
+    AND f.ID_PDE IS NOT NULL AND f.ID_PDE <> '-1'   -- faturas sem PDE não são um cliente
   GROUP BY 1, 2, 3, 4
 ),
 
@@ -423,6 +426,7 @@ LEFT JOIN  `sdb_sbx_adls`.`regulacao`.`gmm_cod_ibge` ibge      ON f.CD_ATC = ibg
 -- MAGIC | D2 | Quanto volume é descartado por `catego` NULL ou fora do de-para? | Códigos com volume relevante precisam de regra no `CASE` |
 -- MAGIC | D3 | Há ATC sem correspondência ou duplicada em `gmm_cod_ibge`? | Sem correspondência = superintendência NULL; duplicada = volume em dobro |
 -- MAGIC | D4 | Calibração do critério de porte | Escolher `share_min` e `v_min` por categoria |
+-- MAGIC | D6 | Há PDE-mês com volume absurdo (erro de leitura/cadastro)? | Confirmados, viram regra de correção na etapa 3 |
 -- MAGIC | D5 | Conferência com a tabela anterior | Diferenças esperadas: + Caminhão/Embarcação e + faturas antes descartadas |
 
 -- COMMAND ----------
@@ -613,6 +617,53 @@ SELECT CATEGORIA_DETALHE, share_min, v_min,
 FROM serie
 GROUP BY 1, 2, 3
 ORDER BY 1, 2, 3;
+
+-- COMMAND ----------
+
+-- MAGIC %md
+-- MAGIC ### D6 — Volumes absurdos por PDE-mês
+-- MAGIC
+-- MAGIC O D1c mostrou faturas isoladas com milhões de m³ em PDEs de 1 economia (ex.: 9,9 milhões de m³ em
+-- MAGIC jul/2022 na ATC 919, ~5% do volume do estado no mês). Lista os PDE-mês com ao menos 50 mil m³ e
+-- MAGIC 10 vezes a mediana histórica do próprio PDE. `excesso` = volume − mediana: o que sairia da base se a
+-- MAGIC regra for trocar o mês pela mediana.
+
+-- COMMAND ----------
+
+WITH cand AS (
+  SELECT ID_PDE, ANO, MES, SUM(vol_med_agua) AS vol, SUM(vol_fat_agua) AS vol_fat,
+         MAX(CD_ATC) AS CD_ATC, MAX(catego) AS catego, MAX(n_economias_agua) AS economias, SUM(qtd_registros) AS faturas
+  FROM `sdb_sbx_adls`.`regulacao`.`gmm_projecao_fato_pde_mes`
+  WHERE ID_PDE IS NOT NULL AND ID_PDE <> '-1'
+  GROUP BY 1, 2, 3
+  HAVING SUM(vol_med_agua) >= 50000
+),
+hist AS (
+  SELECT f.ID_PDE, f.ANO, f.MES, SUM(f.vol_med_agua) AS vol
+  FROM `sdb_sbx_adls`.`regulacao`.`gmm_projecao_fato_pde_mes` f
+  WHERE f.ID_PDE IN (SELECT ID_PDE FROM cand)
+  GROUP BY 1, 2, 3
+),
+med AS (
+  SELECT ID_PDE, PERCENTILE(vol, 0.5) AS mediana, COUNT(*) AS meses
+  FROM hist
+  GROUP BY 1
+),
+tot AS (
+  SELECT ANO, MES, SUM(vol_med_agua) AS vol_total
+  FROM `sdb_sbx_adls`.`regulacao`.`gmm_projecao_fato_pde_mes`
+  GROUP BY 1, 2
+)
+SELECT c.ANO, c.MES, c.ID_PDE, c.CD_ATC, c.catego, c.economias, c.faturas,
+       c.vol, c.vol_fat, m.mediana, m.meses,
+       ROUND(c.vol / GREATEST(m.mediana, 1), 1)  AS razao_mediana,
+       c.vol - m.mediana                         AS excesso,
+       ROUND(100 * (c.vol - m.mediana) / t.vol_total, 2) AS perc_excesso_mes
+FROM cand c
+JOIN med m USING (ID_PDE)
+JOIN tot t USING (ANO, MES)
+WHERE c.vol >= 10 * GREATEST(m.mediana, 1)
+ORDER BY excesso DESC;
 
 -- COMMAND ----------
 
