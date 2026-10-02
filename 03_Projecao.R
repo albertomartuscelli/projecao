@@ -87,6 +87,11 @@ cobertura_premissa = "municipio_servico"
 # Outliers: tsclean no consumo/economia em todo o histórico (que é o treino)
 tratar_outliers = TRUE
 
+# tsclean também nas economias? No não residencial há erros de cadastro
+# (ex.: Pública jul/2023) e a limpeza melhorou o backtest; no residencial
+# as economias são estáveis e a limpeza alterava 17% delas sem ganho
+limpar_economias = c(Residencial = FALSE, Nao_Residencial = TRUE)
+
 ## Agregação e modelo ----------------------------------------------------------
 # Lidos de 00_Decisao_<segmento>.xlsx (backtests). Sem o arquivo, vale o
 # padrão abaixo, que foi o vencedor no backtest de água medida residencial.
@@ -377,7 +382,8 @@ projeta_alvo = function(seg, alvo, escolhas_alvo) {
   base = bases[[seg]]
   mun_exog = exog_municipal(base)
 
-  base_chave = prepara_chave(base, alvo, as.Date(fim_hist), tratar_outliers)
+  base_chave = prepara_chave(base, alvo, as.Date(fim_hist), tratar_outliers,
+                             limpar_economias[[seg]])
 
   ## Economias -----------------------------------------------------------------
 
@@ -537,6 +543,7 @@ premissas = tribble(
          "fora da premissa: {economias_fora_premissa}; cobertura: {cobertura_premissa}; colunas *_ets = só ETS")
   } else "não usada",
   "Outliers", if (tratar_outliers) "tsclean no consumo/economia (histórico)" else "sem tratamento",
+  "Outliers nas economias", paste(names(limpar_economias), limpar_economias, sep = ": ", collapse = " | "),
   "Séries curtas/sem modelo", "fallback: sazonal ingênuo -> média 12m -> segmento",
   "Histórico imputado", glue("buracos de série de até {max_meses_imputacao} meses (maiores ficam de fora)")
 )

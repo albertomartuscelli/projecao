@@ -42,7 +42,9 @@ cfg = list(
   # Outliers: tsclean no consumo/economia só na janela de treino.
   # A acurácia é medida contra o volume bruto (o que de fato foi medido/faturado).
   tratar_outliers  = TRUE,
-  limpar_economias = FALSE,
+  # Economias não residenciais têm erros de cadastro (ex.: Pública jul/2023);
+  # limpá-las no treino melhora todos os ARIMAs no backtest
+  limpar_economias = TRUE,
   alvo_real        = "bruto",               # bruto | ajustado
 
   # Agrupamentos a testar (nomes de `regras_agrupamento`)
