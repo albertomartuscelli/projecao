@@ -10,9 +10,10 @@
 -- MAGIC | 0 | `params` (temp view) | Parâmetros da classificação de porte |
 -- MAGIC | 1 | `gmm_projecao_fato_pde_mes` | Faturas agregadas por PDE × catego × ATC × recorte × mês |
 -- MAGIC | 2 | `gmm_projecao_porte_pde` | Classificação fixa de porte por PDE (Grande / Demais) |
+-- MAGIC | 2b | `gmm_projecao_correcao_pde_mes` | PDE-mês com volume absurdo e o fator que o leva à mediana do PDE |
 -- MAGIC | 3 | `gmm_projecao_histograma_por_categoria_atc_recorte` | Base agregada (a mesma de antes + `porte` e `qt_dias`) |
 -- MAGIC | 4 | `gmm_projecao_grandes_clientes_pde` | Detalhe mensal dos grandes clientes |
--- MAGIC | D1–D5 | — | Diagnósticos de qualidade e calibração |
+-- MAGIC | D1–D6 | — | Diagnósticos de qualidade e calibração |
 -- MAGIC
 -- MAGIC **Fontes**
 -- MAGIC - `prd_raw_adls.bicom_ora_dm_regulatoria.mov_histograma_origem`: fato de faturamento regulatório (uma linha por fatura)
@@ -66,7 +67,9 @@ CREATE OR REPLACE TEMP VIEW params AS
 SELECT
   202501 AS ref_ini,        -- início da janela de referência (AAAAMM)
   202512 AS ref_fim,        -- fim da janela de referência (AAAAMM)
-  6      AS min_meses_ref;  -- meses mínimos com fatura na janela
+  6      AS min_meses_ref,  -- meses mínimos com fatura na janela
+  50000  AS vol_absurdo_min,   -- correção de volumes absurdos (etapa 2b): PDE-mês >= 50 mil m³
+  10     AS razao_absurdo_min; -- e >= 10x a mediana histórica do próprio PDE
 
 -- COMMAND ----------
 
@@ -329,12 +332,101 @@ ORDER BY 1;
 -- COMMAND ----------
 
 -- MAGIC %md
+-- MAGIC ## Etapa 2b — Correção de volumes absurdos por PDE-mês
+-- MAGIC
+-- MAGIC O D6 achou ~300 PDE-mês com volume ≥ 50 mil m³ e ≥ 10× a mediana do próprio PDE, somando ~94 milhões
+-- MAGIC de m³ de excesso (até 10% do volume do estado num mês; quase tudo em 2022–2023). Em ~80% dos casos o
+-- MAGIC volume é 9.999x, 99.99x, 999.99x ou 9.99x.xxx m³: hidrômetro que "virou" (leitura atual menor que a
+-- MAGIC anterior lida como volta completa do registrador). Na maioria o faturado ficou normal (o faturamento
+-- MAGIC barrou), mas o medido não; em ~80 casos o faturado também saiu absurdo.
+-- MAGIC
+-- MAGIC Regra, aplicada a cada volume (medido água, medido esgoto, faturado água, faturado esgoto)
+-- MAGIC separadamente: se o PDE-mês tem volume ≥ `vol_absurdo_min` e ≥ `razao_absurdo_min` × a mediana
+-- MAGIC histórica do PDE naquele volume, o volume passa a ser a mediana. A tabela guarda o **fator**
+-- MAGIC (mediana ÷ volume), aplicado na etapa 3 a todas as linhas do PDE-mês. Economias não mudam.
+-- MAGIC
+-- MAGIC Consumos reais pontuais (ex.: vazamento grande cobrado) também caem na regra; para modelar a
+-- MAGIC tendência, também são outliers. A etapa 3 mantém as colunas `*_bruto` para conferência.
+
+-- COMMAND ----------
+
+CREATE OR REPLACE TABLE `sdb_sbx_adls`.`regulacao`.`gmm_projecao_correcao_pde_mes` AS
+WITH
+
+-- 1. PDE-mês candidatos (algum volume acima do piso)
+cand AS (
+  SELECT f.ID_PDE, f.ANO, f.MES,
+         SUM(f.vol_med_agua) AS med_agua, SUM(f.vol_med_esg) AS med_esg,
+         SUM(f.vol_fat_agua) AS fat_agua, SUM(f.vol_fat_esg) AS fat_esg
+  FROM `sdb_sbx_adls`.`regulacao`.`gmm_projecao_fato_pde_mes` f
+  CROSS JOIN params p
+  WHERE f.ID_PDE IS NOT NULL AND f.ID_PDE <> '-1'
+  GROUP BY f.ID_PDE, f.ANO, f.MES, p.vol_absurdo_min
+  HAVING GREATEST(SUM(f.vol_med_agua), SUM(f.vol_med_esg), SUM(f.vol_fat_agua), SUM(f.vol_fat_esg)) >= p.vol_absurdo_min
+),
+
+-- 2. Histórico mensal completo desses PDEs
+hist AS (
+  SELECT ID_PDE, ANO, MES,
+         SUM(vol_med_agua) AS med_agua, SUM(vol_med_esg) AS med_esg,
+         SUM(vol_fat_agua) AS fat_agua, SUM(vol_fat_esg) AS fat_esg
+  FROM `sdb_sbx_adls`.`regulacao`.`gmm_projecao_fato_pde_mes`
+  WHERE ID_PDE IN (SELECT ID_PDE FROM cand)
+  GROUP BY 1, 2, 3
+),
+
+-- 3. Mediana de cada volume por PDE
+med AS (
+  SELECT ID_PDE,
+         PERCENTILE(med_agua, 0.5) AS mediana_med_agua, PERCENTILE(med_esg, 0.5) AS mediana_med_esg,
+         PERCENTILE(fat_agua, 0.5) AS mediana_fat_agua, PERCENTILE(fat_esg, 0.5) AS mediana_fat_esg
+  FROM hist
+  GROUP BY 1
+),
+
+-- 4. Fator por volume (1 = sem correção)
+fator AS (
+  SELECT c.*, m.mediana_med_agua, m.mediana_med_esg, m.mediana_fat_agua, m.mediana_fat_esg,
+    CASE WHEN c.med_agua >= p.vol_absurdo_min AND c.med_agua >= p.razao_absurdo_min * GREATEST(m.mediana_med_agua, 1)
+         THEN GREATEST(m.mediana_med_agua, 0) / c.med_agua ELSE 1 END AS f_med_agua,
+    CASE WHEN c.med_esg  >= p.vol_absurdo_min AND c.med_esg  >= p.razao_absurdo_min * GREATEST(m.mediana_med_esg, 1)
+         THEN GREATEST(m.mediana_med_esg, 0)  / c.med_esg  ELSE 1 END AS f_med_esg,
+    CASE WHEN c.fat_agua >= p.vol_absurdo_min AND c.fat_agua >= p.razao_absurdo_min * GREATEST(m.mediana_fat_agua, 1)
+         THEN GREATEST(m.mediana_fat_agua, 0) / c.fat_agua ELSE 1 END AS f_fat_agua,
+    CASE WHEN c.fat_esg  >= p.vol_absurdo_min AND c.fat_esg  >= p.razao_absurdo_min * GREATEST(m.mediana_fat_esg, 1)
+         THEN GREATEST(m.mediana_fat_esg, 0)  / c.fat_esg  ELSE 1 END AS f_fat_esg
+  FROM cand c
+  JOIN med m USING (ID_PDE)
+  CROSS JOIN params p
+)
+
+SELECT *
+FROM fator
+WHERE f_med_agua < 1 OR f_med_esg < 1 OR f_fat_agua < 1 OR f_fat_esg < 1;
+
+-- COMMAND ----------
+
+-- Resumo da correção: volume retirado por ano
+SELECT ANO,
+       COUNT(*)                                AS pde_mes,
+       ROUND(SUM(med_agua * (1 - f_med_agua))) AS retirado_med_agua,
+       ROUND(SUM(med_esg  * (1 - f_med_esg)))  AS retirado_med_esg,
+       ROUND(SUM(fat_agua * (1 - f_fat_agua))) AS retirado_fat_agua,
+       ROUND(SUM(fat_esg  * (1 - f_fat_esg)))  AS retirado_fat_esg
+FROM `sdb_sbx_adls`.`regulacao`.`gmm_projecao_correcao_pde_mes`
+GROUP BY 1
+ORDER BY 1;
+
+-- COMMAND ----------
+
+-- MAGIC %md
 -- MAGIC ## Etapa 3 — Base agregada (categoria × ATC × recorte × porte × mês)
 -- MAGIC
--- MAGIC Mesma tabela usada hoje no ETL da base analítica, com duas colunas novas:
+-- MAGIC Mesma tabela usada hoje no ETL da base analítica, com volumes corrigidos pela etapa 2b e colunas novas:
 -- MAGIC - **`porte`**: `Grande` ou `Demais` (PDE sem classificação = `Demais`). Somando os dois portes,
 -- MAGIC   obtêm-se os totais de antes.
 -- MAGIC - **`qt_dias`**: soma dos dias de consumo faturados, para normalizar o volume pelo ciclo de leitura.
+-- MAGIC - **`vol_med_agua_bruto`**, **`vol_fat_agua_bruto`**: volumes antes da correção da etapa 2b.
 -- MAGIC
 -- MAGIC Colunas removidas por redundância: `vol_medido_reg_agua` (= `vol_med_agua`),
 -- MAGIC `vol_faturado_agua` (= `vol_fat_agua`), `vol_medido_reg_esgoto`, `vol_medido_reg_end`,
@@ -367,20 +459,25 @@ SELECT
   SUM(f.n_economias_esg)      AS n_economias_esg,
   SUM(f.n_economias_esg_real) AS n_economias_esg_real,
   SUM(f.n_economias_esg_disp) AS n_economias_esg_disp,
-  -- volume medido
-  SUM(f.vol_med_agua)         AS vol_med_agua,
-  SUM(f.vol_med_esg)          AS vol_med_esg,
-  SUM(f.vol_med_esg_real)     AS vol_med_esg_real,
-  SUM(f.vol_med_esg_disp)     AS vol_med_esg_disp,
-  -- volume faturado
-  SUM(f.vol_fat_agua)         AS vol_fat_agua,
-  SUM(f.vol_fat_esg)          AS vol_fat_esg,
-  SUM(f.vol_fat_esg_real)     AS vol_fat_esg_real,
-  SUM(f.vol_fat_esg_disp)     AS vol_fat_esg_disp
+  -- volume medido (corrigido na etapa 2b)
+  SUM(f.vol_med_agua     * COALESCE(c.f_med_agua, 1)) AS vol_med_agua,
+  SUM(f.vol_med_esg      * COALESCE(c.f_med_esg, 1))  AS vol_med_esg,
+  SUM(f.vol_med_esg_real * COALESCE(c.f_med_esg, 1))  AS vol_med_esg_real,
+  SUM(f.vol_med_esg_disp * COALESCE(c.f_med_esg, 1))  AS vol_med_esg_disp,
+  -- volume faturado (corrigido na etapa 2b)
+  SUM(f.vol_fat_agua     * COALESCE(c.f_fat_agua, 1)) AS vol_fat_agua,
+  SUM(f.vol_fat_esg      * COALESCE(c.f_fat_esg, 1))  AS vol_fat_esg,
+  SUM(f.vol_fat_esg_real * COALESCE(c.f_fat_esg, 1))  AS vol_fat_esg_real,
+  SUM(f.vol_fat_esg_disp * COALESCE(c.f_fat_esg, 1))  AS vol_fat_esg_disp,
+  -- antes da correção
+  SUM(f.vol_med_agua)         AS vol_med_agua_bruto,
+  SUM(f.vol_fat_agua)         AS vol_fat_agua_bruto
 FROM `sdb_sbx_adls`.`regulacao`.`gmm_projecao_fato_pde_mes` f
 INNER JOIN `sdb_sbx_adls`.`regulacao`.`gmm_de_para_catego` dp    ON f.catego = dp.catego
 LEFT JOIN  `sdb_sbx_adls`.`regulacao`.`gmm_cod_ibge` ibge         ON f.CD_ATC = ibge.CD_ATC
 LEFT JOIN  `sdb_sbx_adls`.`regulacao`.`gmm_projecao_porte_pde` pt ON f.ID_PDE = pt.ID_PDE
+LEFT JOIN  `sdb_sbx_adls`.`regulacao`.`gmm_projecao_correcao_pde_mes` c
+  ON f.ID_PDE = c.ID_PDE AND f.ANO = c.ANO AND f.MES = c.MES
 GROUP BY
   dp.catego, dp.ds_catego, dp.CATEGORIA_DETALHE, dp.CATEGORIA,
   COALESCE(pt.porte, 'Demais'),
@@ -407,10 +504,15 @@ SELECT
   f.ANO, f.MES,
   pt.vol_mediana_ref, pt.vol_max_ref, pt.meses_ref, pt.share_serie,
   f.qt_dias, f.n_economias_agua, f.n_economias_esg,
-  f.vol_med_agua, f.vol_med_esg, f.vol_fat_agua, f.vol_fat_esg
+  f.vol_med_agua * COALESCE(c.f_med_agua, 1) AS vol_med_agua,
+  f.vol_med_esg  * COALESCE(c.f_med_esg, 1)  AS vol_med_esg,
+  f.vol_fat_agua * COALESCE(c.f_fat_agua, 1) AS vol_fat_agua,
+  f.vol_fat_esg  * COALESCE(c.f_fat_esg, 1)  AS vol_fat_esg
 FROM `sdb_sbx_adls`.`regulacao`.`gmm_projecao_fato_pde_mes` f
 INNER JOIN `sdb_sbx_adls`.`regulacao`.`gmm_projecao_porte_pde` pt
   ON f.ID_PDE = pt.ID_PDE AND pt.porte = 'Grande'
+LEFT JOIN  `sdb_sbx_adls`.`regulacao`.`gmm_projecao_correcao_pde_mes` c
+  ON f.ID_PDE = c.ID_PDE AND f.ANO = c.ANO AND f.MES = c.MES
 INNER JOIN `sdb_sbx_adls`.`regulacao`.`gmm_de_para_catego` dp ON f.catego = dp.catego
 LEFT JOIN  `sdb_sbx_adls`.`regulacao`.`gmm_cod_ibge` ibge      ON f.CD_ATC = ibge.CD_ATC;
 
@@ -426,8 +528,8 @@ LEFT JOIN  `sdb_sbx_adls`.`regulacao`.`gmm_cod_ibge` ibge      ON f.CD_ATC = ibg
 -- MAGIC | D2 | Quanto volume é descartado por `catego` NULL ou fora do de-para? | Códigos com volume relevante precisam de regra no `CASE` |
 -- MAGIC | D3 | Há ATC sem correspondência ou duplicada em `gmm_cod_ibge`? | Sem correspondência = superintendência NULL; duplicada = volume em dobro |
 -- MAGIC | D4 | Calibração do critério de porte | Escolher `share_min` e `v_min` por categoria |
--- MAGIC | D6 | Há PDE-mês com volume absurdo (erro de leitura/cadastro)? | Confirmados, viram regra de correção na etapa 3 |
--- MAGIC | D5 | Conferência com a tabela anterior | Diferenças esperadas: + Caminhão/Embarcação e + faturas antes descartadas |
+-- MAGIC | D6 | Há PDE-mês com volume absurdo (erro de leitura/cadastro)? | Lista o que a etapa 2b corrige (medido de água) |
+-- MAGIC | D5 | Conferência com a tabela anterior | Diferenças esperadas: + Caminhão/Embarcação e − volumes absurdos (etapa 2b); a coluna `_bruto` deve bater com o antes |
 
 -- COMMAND ----------
 
@@ -672,11 +774,12 @@ SELECT
   COALESCE(n.ANO, o.ANO) AS ANO, COALESCE(n.MES, o.MES) AS MES, COALESCE(n.CATEGORIA, o.CATEGORIA) AS CATEGORIA,
   o.vol_med_agua AS vol_med_agua_antes, n.vol_med_agua AS vol_med_agua_novo,
   ROUND(100 * (n.vol_med_agua / o.vol_med_agua - 1), 3) AS var_perc_vol_med,
+  ROUND(100 * (n.vol_med_agua_bruto / o.vol_med_agua - 1), 3) AS var_perc_vol_med_bruto,
   o.vol_fat_agua AS vol_fat_agua_antes, n.vol_fat_agua AS vol_fat_agua_novo,
   ROUND(100 * (n.vol_fat_agua / o.vol_fat_agua - 1), 3) AS var_perc_vol_fat,
   o.n_economias_agua AS econ_antes, n.n_economias_agua AS econ_novo
 FROM (SELECT ANO, MES, CATEGORIA, SUM(vol_med_agua) AS vol_med_agua, SUM(vol_fat_agua) AS vol_fat_agua,
-             SUM(n_economias_agua) AS n_economias_agua
+             SUM(vol_med_agua_bruto) AS vol_med_agua_bruto, SUM(n_economias_agua) AS n_economias_agua
       FROM `sdb_sbx_adls`.`regulacao`.`gmm_projecao_histograma_por_categoria_atc_recorte`
       GROUP BY 1, 2, 3) n
 FULL OUTER JOIN
