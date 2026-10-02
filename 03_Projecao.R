@@ -221,13 +221,15 @@ le_decisao = function(seg) {
   arq = segmentos[[seg]]$arq_decisao
 
   dec = if (file.exists(arq)) {
-    # A decisão só vale para a mesma especificação de tarifa dos modelos
+    # A decisão só vale para a mesma especificação de regressoras dos modelos
     par = tryCatch(read_excel(arq, "parametros"), error = function(e) tibble(parametro = character()))
-    tarifa_bt = par$valor[par$parametro == "usar_tarifa_no_modelo"]
-    if (!identical(tarifa_bt, as.character(usar_tarifa_no_modelo))) {
-      warning(glue("{basename(arq)}: backtest feito com outra especificação de tarifa ",
-                   "(usar_tarifa_no_modelo = {coalesce(tarifa_bt[1], 'não informado')}; agora {usar_tarifa_no_modelo}). ",
-                   "Rode o backtest de novo."), call. = FALSE)
+    for (op in c("usar_tarifa_no_modelo", "usar_nivel_no_modelo")) {
+      valor_bt = par$valor[par$parametro == op]
+      if (!identical(valor_bt, as.character(get(op)))) {
+        warning(glue("{basename(arq)}: backtest feito com outra especificação ",
+                     "({op} = {coalesce(valor_bt[1], 'não informado')}; agora {get(op)}). ",
+                     "Rode o backtest de novo."), call. = FALSE)
+      }
     }
     read_excel(arq, "decisao")
   } else {

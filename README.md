@@ -95,9 +95,10 @@ Pública):
 
    | Modelo | Variável | Especificação |
    |---|---|---|
-   | `arima_0` a `arima_3` | consumo/economia | ARIMA com regressoras incrementais: temperatura, chuva, nível dos reservatórios |
+   | `arima_0` a `arima_2` | consumo/economia | ARIMA com regressoras incrementais: temperatura, chuva |
+   | `arima_3` | consumo/economia | `arima_2` + nível dos reservatórios (só com `usar_nivel_no_modelo = TRUE`) |
    | `arima_4` | consumo/economia | `arima_3` + tarifa (só com `usar_tarifa_no_modelo = TRUE`) |
-   | `arima_5` | consumo/economia | todas as regressoras: clima, nível e CAGED (+ tarifa com `TRUE`) |
+   | `arima_5` | consumo/economia | todas as regressoras ligadas: clima e CAGED (+ nível, + tarifa) |
    | `arima_2_D1` | consumo/economia | diferença sazonal forçada (segue o nível do ano anterior) |
    | `arima_5_d1_0` | consumo/economia | diferença simples forçada, sem constante (sem drift) |
    | `vol_arima_2`, `vol_arima_5`, `vol_arima_5_D1_0` | volume direto | mesmas regressoras, sem passar pelas economias |
@@ -237,6 +238,25 @@ Pontos em aberto:
 Saídas em `05_FRAMEWORK_5/04_PROJECAO/`: `Projecao_Volume_202712.xlsx` (premissas,
 escolhas, totais anuais por segmento/categoria/superintendência, série mensal)
 e `graficos/`.
+
+### Nível dos reservatórios: fora dos modelos
+
+Com `usar_nivel_no_modelo = FALSE` (padrão), `lag_nv_sim` sai das regressoras (`arima_3` sai do catálogo).
+Motivos:
+
+- **Abrangência errada.** É o volume útil do Sistema Integrado Metropolitano, que abastece a RMSP, mas
+  entrava em todas as séries, inclusive interior e litoral, que dependem de outros mananciais.
+- **Pouca informação própria.** É uma série única, com ciclo sazonal (enche no verão, esvazia no inverno)
+  e movida pela chuva acumulada: colinear com a sazonalidade e com `prec_tot`.
+- **O mecanismo não é linear.** O nível só muda o consumo quando dispara medidas operacionais (gestão de
+  pressão, campanhas, bônus/multa, como em 2014-15). Com reservatórios em faixa normal, o efeito esperado
+  é nulo; um coeficiente linear mistura os dois regimes.
+- **Projeção sem cenário.** Na projeção, o nível vem de um `auto.arima` próprio que ignora os cenários de
+  clima (o El Niño não muda o nível), e o erro dessa previsão entra no consumo.
+
+Com `TRUE`, volta a especificação anterior; `arima_2` × `arima_3` no backtest é o teste direto. A
+alternativa melhor para o efeito real é uma variável de intervenção nas séries da RMSP (1 nos meses com
+gestão de pressão ou restrição), com o cenário de manter ou retirar a medida em 2027.
 
 ## Observações sobre os dados
 

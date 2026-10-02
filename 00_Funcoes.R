@@ -96,8 +96,18 @@ regras_agrupamento = list(
 # comparar arima_3 x arima_4 no backtest. Mudou? Rode os backtests de novo.
 usar_tarifa_no_modelo = FALSE
 
+# Nível dos reservatórios (Sistema Integrado Metropolitano, t-1) como regressora.
+# FALSE (padrão): sai dos modelos. Motivos (README, "Nível dos reservatórios"):
+# é uma série única da RMSP aplicada a todas as séries (inclusive interior e
+# litoral), colinear com a sazonalidade e a chuva, e o efeito real é por
+# medidas operacionais (ex.: gestão de pressão), não linear no nível. Na
+# projeção ela ainda exige um auto.arima próprio, que ignora os cenários de clima.
+# TRUE: volta a especificação anterior (arima_3 = arima_2 + nível); arima_2 x
+# arima_3 no backtest é o teste direto. Mudou? Rode os backtests de novo.
+usar_nivel_no_modelo = FALSE
+
 regs_clima = c("log(temp_med)", "log(prec_tot)")
-regs_nivel = c(regs_clima, "lag_nv_sim")
+regs_nivel = c(regs_clima, if (usar_nivel_no_modelo) "lag_nv_sim")
 regs_todas = c(regs_nivel, if (usar_tarifa_no_modelo) "tarifa", "log(caged)")
 
 # ARIMA a partir de texto (ordens e regressoras). constante = FALSE -> "0 + ..."
@@ -108,9 +118,10 @@ arima_def = function(resposta, regs = character(0), pdq = "pdq(0:2, 0:1, 0:2)",
 }
 
 # Catálogo de modelos. Cada backtest escolhe os seus em `cfg$modelos`.
-#   arima_0..3   : consumo/economia; regressoras incrementais (clima, nível)
+#   arima_0..2   : consumo/economia; regressoras incrementais (temperatura, chuva)
+#   arima_3      : arima_2 + nível (só com usar_nivel_no_modelo = TRUE)
 #   arima_4      : arima_3 + tarifa (só com usar_tarifa_no_modelo = TRUE)
-#   arima_5      : todas as regressoras (clima, nível, CAGED; + tarifa se TRUE)
+#   arima_5      : todas as regressoras ligadas (clima + CAGED; + nível, + tarifa)
 #   arima_2_D1   : diferença sazonal forçada (segue o nível do ano anterior)
 #   arima_5_d1_0 : diferença simples forçada, sem constante (sem drift)
 #   vol_*        : volume direto (sem passar pelas economias)
@@ -120,7 +131,7 @@ modelos_catalogo = list(
   arima_0 = arima_def("log(consumo)"),
   arima_1 = arima_def("log(consumo)", "log(temp_med)"),
   arima_2 = arima_def("log(consumo)", regs_clima),
-  arima_3 = arima_def("log(consumo)", regs_nivel),
+  arima_3 = if (usar_nivel_no_modelo) arima_def("log(consumo)", regs_nivel),
   arima_4 = if (usar_tarifa_no_modelo) arima_def("log(consumo)", c(regs_nivel, "tarifa")),
   arima_5 = arima_def("log(consumo)", regs_todas),
   arima_2_D1   = arima_def("log(consumo)", regs_clima, PDQ = "PDQ(0:1, 1, 0:1)"),

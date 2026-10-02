@@ -157,9 +157,10 @@ write_xlsx(list(decisao = decisao,
                 melhor_modelo = melhor_modelo,
                 melhor_agregacao = melhor_agregacao,
                 elasticidade_geral = imap_dfr(bt, ~ mutate(.x$elasticidades$geral, alvo = .y, .before = 1)),
-                parametros = tibble(parametro = c(names(cfg), "usar_tarifa_no_modelo"),
+                parametros = tibble(parametro = c(names(cfg), "usar_tarifa_no_modelo", "usar_nivel_no_modelo"),
                                     valor = c(map_chr(cfg, ~ paste(format(unlist(.x)), collapse = ", ")),
-                                              as.character(usar_tarifa_no_modelo)))),
+                                              as.character(usar_tarifa_no_modelo),
+                                              as.character(usar_nivel_no_modelo)))),
            file.path(cfg$dir_saida, glue("00_Decisao_{nome_arq(cfg$segmento)}.xlsx")))
 
 # Resultados leves (sem os modelos ajustados, que ficam em /modelos)
