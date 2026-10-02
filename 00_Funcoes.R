@@ -606,6 +606,13 @@ monta_fallback = function(base_ts, grade, fim_hist) {
     select(all_of(chaves_ts), periodo, consumo_fb)
 }
 
+# Resumo numérico do treino: muda se a base ou o tratamento de outliers mudar
+assinatura_treino = function(train) {
+  num = as_tibble(train) %>% select(where(is.numeric))
+  c(linhas = nrow(num), series = n_distinct(as_tibble(train)[chaves_ts]),
+    soma = signif(sum(abs(as.matrix(num)), na.rm = TRUE), 12))
+}
+
 # Backtest de um agrupamento: base, fit, forecast por cenário e fallback
 backtest_agrupamento = function(base_chave, agrup, cfg, ctx) {
 
@@ -643,8 +650,16 @@ backtest_agrupamento = function(base_chave, agrup, cfg, ctx) {
     fit_model = NULL
   }
 
+  # O fit salvo também só vale para os mesmos dados de treino (base, outliers)
+  assinatura = assinatura_treino(train)
+  if (!is.null(fit_model) && !identical(attr(fit_model, "assinatura"), assinatura)) {
+    message("Fit salvo com outros dados de treino - reestimando.")
+    fit_model = NULL
+  }
+
   if (is.null(fit_model)) {
     fit_model = ajusta_catalogo(train, modelos, cfg$n_workers)
+    attr(fit_model, "assinatura") = assinatura
     saveRDS(fit_model, arq_fit)
   }
 
