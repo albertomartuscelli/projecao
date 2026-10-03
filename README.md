@@ -95,13 +95,14 @@ Pública):
 
    | Modelo | Variável | Especificação |
    |---|---|---|
-   | `arima_0` a `arima_2` | consumo/economia | ARIMA com regressoras incrementais: temperatura, chuva |
-   | `arima_3` | consumo/economia | `arima_2` + nível dos reservatórios (só com `usar_nivel_no_modelo = TRUE`) |
-   | `arima_4` | consumo/economia | `arima_3` + tarifa (só com `usar_tarifa_no_modelo = TRUE`) |
-   | `arima_5` | consumo/economia | todas as regressoras ligadas: clima e CAGED (+ nível, + tarifa); sai se só houver clima |
-   | `arima_2_D1` | consumo/economia | diferença sazonal forçada (segue o nível do ano anterior) |
-   | `arima_5_d1_0` | consumo/economia | diferença simples forçada, sem constante (sem drift) |
-   | `vol_arima_2`, `vol_arima_5`, `vol_arima_5_D1_0` | volume direto | mesmas regressoras, sem passar pelas economias |
+   | `arima_0`, `arima_1`, `arima_2` | consumo/economia | ordens automáticas; sem regressoras, temperatura, temperatura + chuva |
+   | `arima_2_caged` | consumo/economia | `arima_2` + CAGED (`arima_2` × `arima_2_caged` testa o CAGED) |
+   | `arima_2_dsaz` | consumo/economia | `arima_2` com diferença sazonal forçada (parte do mesmo mês do ano anterior) |
+   | `arima_2_sem_drift` | consumo/economia | `arima_2` com diferença simples forçada e sem constante (não extrapola tendência) |
+   | `vol_arima_2`, `vol_arima_2_caged` | volume direto | mesmas regressoras, sem passar pelas economias |
+   | `vol_arima_2_dsaz_sem_drift` | volume direto | diferença sazonal forçada, sem constante |
+
+   Tarifa e nível dos reservatórios não entram nos modelos (ver "Tarifa" e "Nível dos reservatórios").
    | `snaive` | consumo/economia | benchmark: entra nas tabelas, mas não é escolhido |
 
 2. **Qual a melhor agregação?** `G1_municipioA_clusterBC` (municípios A
@@ -123,8 +124,9 @@ Como funciona:
 - Exógenas no teste: `realizado` (ex-post) e três cenários ex-ante
   (`base`, `quente_seco`, `frio_umido`).
 - Seleção: WAPE por superintendência dentro de cada categoria, no cenário
-  `base`. Em empate técnico (`tolerancia_selecao`), fica a agregação com
-  menos séries. A linha `COMBINADO / escolha` nas tabelas de acurácia mede o
+  `base`. Em empate técnico (`tolerancia_selecao`), fica o modelo sem drift
+  (o teste de 8 meses quase não pune um drift errado, e a projeção vai 16
+  meses à frente) e, depois, a agregação com menos séries. A linha `COMBINADO / escolha` nas tabelas de acurácia mede o
   conjunto (cada categoria com a sua escolha).
 - Séries curtas ou sem modelo entram com fallback (sazonal ingênuo → média de
   12 meses → média do segmento), para o total do teste ficar completo.
@@ -147,7 +149,6 @@ o volume vem direto do modelo e só recebe o fator tarifário)
 | Consumo/economia ou volume | Modelo e agregação da decisão do backtest **por categoria**, ajustados em todo o histórico. Água e esgoto faturados usam a escolha do medido do mesmo serviço |
 | Clima | Cenário principal `el_nino`: média do mês no histórico + anomalias do El Niño análogo em 2027. Alternativas: `base` (só a média), `quente_seco` e `frio_umido` (±1 desvio-padrão) |
 | CAGED | Tendência dos últimos 12 meses |
-| Nível dos reservatórios | `auto.arima` na série histórica |
 | Economias | Projetadas por chave, uma vez por alvo: ETS amortecido no log do total de cada nível (`nivel_economias`: superintendência × recorte no residencial, somando as categorias por causa da migração normal → social; superintendência × categoria no não residencial), repartido pela participação de cada chave no último mês. Residencial em 2027: premissa da engenharia somada ao estoque de dez/2026 nas chaves dos municípios cobertos. Colunas `*_ets` mostram o resultado só com ETS |
 | Tarifa real (IRT) | Último valor deflacionado pelo IPCA mês a mês; reajuste nominal de 6,5% em abr/2027 (ver "Pontos em aberto") |
 | Fator tarifário | (IRT projetado / IRT médio dos últimos 12 meses) ^ elasticidade |
@@ -182,14 +183,12 @@ em 3 meses, porque um único evento não se repete mês a mês, e aplicadas sobr
 o cenário base nos meses de `el_nino_periodo`. `el_nino_intensidade` escala o
 evento (0,5 = El Niño fraco).
 
-O efeito no volume passa pela temperatura e pela chuva dos modelos. O nível
-dos reservatórios segue a projeção do `auto.arima` em todos os cenários.
+O efeito no volume passa pela temperatura e pela chuva dos modelos.
 
 ### Tarifa: fora dos modelos, elasticidade como parâmetro
 
-Com `usar_tarifa_no_modelo = FALSE` (padrão, em `00_Funcoes.R`), nenhum modelo tem a tarifa como
-regressora: `arima_4` sai do catálogo e `arima_5`, `arima_5_d1_0` e `vol_*` ficam com clima, nível e
-CAGED. O efeito do reajuste entra na projeção pela elasticidade parametrizada. Motivos:
+Nenhum modelo tem a tarifa como regressora. O efeito do reajuste entra na projeção pela elasticidade
+parametrizada (`elasticidade_tarifa`, no `03_Projecao.R`), aplicada a todos os modelos. Motivos:
 
 - **Não há como identificar o efeito no ARIMA.** O IRT é um índice único estadual: nenhuma variação entre
   séries, só 4 a 5 degraus em 2022–2026. Os degraus caem sempre em transições sazonais e se misturam com a
@@ -208,15 +207,10 @@ CAGED. O efeito do reajuste entra na projeção pela elasticidade parametrizada.
   dos modelos. Um coeficiente mal estimado, por outro lado, pode mover a projeção em vários pontos depois
   de cada reajuste.
 - **A elasticidade certa vem de microdados**, com variação entre faixas, categorias e tarifa social
-  (projeto `elasticidade_tarifa`). Ela entra em `elasticidade_tarifa`, no `03_Projecao.R`.
-- Com `usar_tarifa_no_modelo = TRUE`, volta a especificação anterior: `arima_3` × `arima_4` no backtest é
-  o teste direto do ganho da tarifa. O arquivo de decisão registra a especificação, e a projeção avisa se
-  a decisão foi feita com outra.
+  (projeto `elasticidade_tarifa`).
 
 Cuidados implementados:
 
-- **Sem dupla contagem.** Com `TRUE`, os modelos com tarifa (`arima_4`/`arima_5`) não recebem o fator; a
-  trajetória do IRT entra como regressora.
 - **Referência.** O fator compara a tarifa projetada com a tarifa real média dos últimos 12 meses, que é o
   nível já embutido no consumo recente.
 - **Sensibilidade.** As colunas `vol_eps_baixa` e `vol_eps_alta` aplicam 0,5× e 1,5× a elasticidade.
@@ -241,29 +235,25 @@ e `graficos/`.
 
 ### Nível dos reservatórios: fora dos modelos
 
-Com `usar_nivel_no_modelo = FALSE` (padrão), `lag_nv_sim` sai das regressoras (`arima_3` sai do catálogo).
-Motivos:
+O nível do Sistema Integrado Metropolitano não entra nos modelos. Motivos:
 
-- **Abrangência errada.** É o volume útil do Sistema Integrado Metropolitano, que abastece a RMSP, mas
-  entrava em todas as séries, inclusive interior e litoral, que dependem de outros mananciais.
-- **Pouca informação própria.** É uma série única, com ciclo sazonal (enche no verão, esvazia no inverno)
-  e movida pela chuva acumulada: colinear com a sazonalidade e com `prec_tot`.
+- **Abrangência errada.** Abastece a RMSP, mas entrava em todas as séries, inclusive interior e litoral,
+  que dependem de outros mananciais.
+- **Pouca informação própria.** É uma série única, sazonal e movida pela chuva acumulada: colinear com a
+  sazonalidade e com `prec_tot`.
 - **O mecanismo não é linear.** O nível só muda o consumo quando dispara medidas operacionais (gestão de
-  pressão, campanhas, bônus/multa, como em 2014-15). Com reservatórios em faixa normal, o efeito esperado
-  é nulo; um coeficiente linear mistura os dois regimes.
-- **Projeção sem cenário.** Na projeção, o nível vem de um `auto.arima` próprio que ignora os cenários de
-  clima (o El Niño não muda o nível), e o erro dessa previsão entra no consumo.
+  pressão, campanhas, bônus/multa, como em 2014-15). Um coeficiente linear mistura os dois regimes.
+- **Projeção sem cenário.** Exigia um `auto.arima` próprio que ignorava os cenários de clima.
 
-Com `TRUE`, volta a especificação anterior; `arima_2` × `arima_3` no backtest é o teste direto. A
-alternativa melhor para o efeito real é uma variável de intervenção nas séries da RMSP (1 nos meses com
-gestão de pressão ou restrição), com o cenário de manter ou retirar a medida em 2027.
+A alternativa para o efeito real é uma variável de intervenção nas séries da RMSP (1 nos meses com gestão
+de pressão ou restrição), com o cenário de manter ou retirar a medida em 2027. O notebook `02_Covariaveis`
+continua gravando o nível, para essa análise.
 
 ### CAGED: candidato, decidido no backtest
 
-Diferente da tarifa e do nível, o CAGED tem variação por município e um mecanismo plausível no não
-residencial (atividade econômica local). Por isso fica como candidato (`usar_caged_no_modelo = TRUE`): com
-tarifa e nível fora, `arima_5` × `arima_2` (e `vol_arima_5` × `vol_arima_2`) diferem só pelo CAGED, e a
-seleção por categoria decide. Cuidados:
+O CAGED tem variação por município e um mecanismo plausível no não residencial (atividade econômica
+local). Fica como candidato: `arima_2_caged` × `arima_2` (e `vol_arima_2_caged` × `vol_arima_2`) diferem
+só pelo CAGED, e a seleção por categoria decide. Cuidados:
 
 - **Dentro de cada série, o CAGED é quase uma tendência suave** (sem recessão em 2022–2026). O coeficiente
   tende a capturar a tendência do consumo, não o ciclo econômico.
@@ -273,9 +263,10 @@ seleção por categoria decide. Cuidados:
 - **Ruído nos municípios pequenos** (empregos agrícolas sazonais com saltos de 50% a 90% no mês). Nas séries
   agregadas o efeito dilui, porque o CAGED do grupo é a soma dos municípios.
 
-Critério para manter numa categoria: modelo com CAGED vence o sem CAGED por mais que a tolerância (WAPE,
+Critério para manter numa categoria: o modelo com CAGED vence o sem CAGED por mais que a tolerância (WAPE,
 cenário `base`) **e** a elasticidade do CAGED (aba de elasticidades) tem sinal positivo e magnitude
-plausível (0 a 1) na maioria das séries. Sem isso, `usar_caged_no_modelo = FALSE`.
+plausível (0 a 1) na maioria das séries. Para tirar de vez, retire `arima_2_caged` e `vol_arima_2_caged`
+de `cfg$modelos`.
 
 ## Observações sobre os dados
 

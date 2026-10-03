@@ -9,7 +9,7 @@
 #
 # Fluxo (funções em 00_Funcoes.R):
 #   0. Premissas
-#   1. Importação e premissas globais (tarifa real, nível dos reservatórios)
+#   1. Importação e premissa global (tarifa real)
 #   2. Escolha de agregação e modelo (decisão dos backtests)
 #   3. Projeção por segmento x alvo
 #   4. Consolidação (mensal e anual)
@@ -99,7 +99,7 @@ escolha_padrao = list(agrupamento = "G1_municipioA_clusterBC", modelo = "arima_2
 
 # Sobrepõe a decisão do backtest, se preenchido. Exemplo:
 #   add_row(segmento = "Nao_Residencial", alvo = "med_esg", categoria_detalhe = "Industrial",
-#           agrupamento = "G2_superintendencia", modelo = "arima_5")
+#           agrupamento = "G2_superintendencia", modelo = "arima_2_caged")
 escolha_manual = tibble(segmento = character(), alvo = character(), categoria_detalhe = character(),
                         agrupamento = character(), modelo = character())
 
@@ -111,11 +111,8 @@ mes_reajuste     = as.Date("2027-04-01")  # 2026: vigência em jan, chegou às c
 ipca_aa          = 0.045                  # IPCA projetado (a.a.) - atualizar com o Focus
 
 ## Elasticidade-preço (consumo/economia x tarifa real) ---------------------------
-# Aplicada sobre a projeção quando o modelo NÃO tem tarifa (com
-# usar_tarifa_no_modelo = FALSE, nenhum tem). Com TRUE, os modelos com tarifa
-# (arima_4/5) recebem a trajetória do IRT como regressora e não recebem o
-# ajuste, para não contar o efeito duas vezes.
-# Referência: projeto elasticidade_tarifa (microdados).
+# Aplicada sobre a projeção de todos os modelos (nenhum tem a tarifa como
+# regressora). Referência: projeto elasticidade_tarifa (microdados).
 elasticidade_tarifa = c("Residencial Normal"            = -0.10,
                         "Residencial Social"            = -0.10,
                         "Residencial Social Vulnerável" = -0.10,
@@ -187,24 +184,16 @@ irt_proj = tibble(periodo = periodos_proj) %>%
            if_else(periodo >= yearmonth(mes_reajuste), 1 + reajuste_nominal, 1)) %>%
   select(-k)
 
-## 1.2 Nível dos reservatórios e exógenas globais ------------------------------
-
-glob_proj = projeta_nivel(glob_exog, fim_hist, periodos_proj) %>%
-  left_join(irt_proj, by = "periodo")
-
 g_premissas = bind_rows(
   glob_exog %>%
-    transmute(periodo = yearmonth(periodo), `IRT real` = tarifa, `Nível (t)` = nv_sim, tipo = "Histórico"),
-  glob_proj %>%
-    transmute(periodo, `IRT real` = tarifa, `Nível (t)` = nv_sim, tipo = "Projeção")) %>%
-  pivot_longer(c(`IRT real`, `Nível (t)`)) %>%
-  ggplot(aes(x = periodo, y = value, color = tipo)) +
+    transmute(periodo = yearmonth(periodo), tarifa, tipo = "Histórico"),
+  irt_proj %>%
+    mutate(tipo = "Projeção")) %>%
+  ggplot(aes(x = periodo, y = tarifa, color = tipo)) +
   geom_line(lwd = 1) +
-  geom_hline(data = tibble(name = "IRT real", ref = irt_ref),
-             aes(yintercept = ref), linetype = "dashed", color = "grey50") +
-  facet_wrap(~name, scales = "free_y", ncol = 1) +
+  geom_hline(yintercept = irt_ref, linetype = "dashed", color = "grey50") +
   scale_color_manual("", values = c("Histórico" = "black", "Projeção" = "#12d0ff")) +
-  labs(title = "Premissas globais",
+  labs(title = "Tarifa real (IRT, base 100)",
        subtitle = glue("Reajuste nominal de {percent(reajuste_nominal, 0.1)} em {format(mes_reajuste, '%m/%Y')}, ",
                        "IPCA {percent(ipca_aa, 0.1)} a.a. | tracejado: referência do fator tarifário")) +
   tema
@@ -221,16 +210,6 @@ le_decisao = function(seg) {
   arq = segmentos[[seg]]$arq_decisao
 
   dec = if (file.exists(arq)) {
-    # A decisão só vale para a mesma especificação de regressoras dos modelos
-    par = tryCatch(read_excel(arq, "parametros"), error = function(e) tibble(parametro = character()))
-    for (op in c("usar_tarifa_no_modelo", "usar_nivel_no_modelo", "usar_caged_no_modelo")) {
-      valor_bt = par$valor[par$parametro == op]
-      if (!identical(valor_bt, as.character(get(op)))) {
-        warning(glue("{basename(arq)}: backtest feito com outra especificação ",
-                     "({op} = {coalesce(valor_bt[1], 'não informado')}; agora {get(op)}). ",
-                     "Rode o backtest de novo."), call. = FALSE)
-      }
-    }
     read_excel(arq, "decisao")
   } else {
     message(glue("Decisão não encontrada ({arq}) - usando padrão para {seg}."))
@@ -258,11 +237,14 @@ le_decisao = function(seg) {
 escolhas = map_dfr(names(segmentos), le_decisao) %>%
   rows_update(escolha_manual %>% mutate(fonte = "manual"),
               by = c("segmento", "alvo", "categoria_detalhe"), unmatched = "ignore") %>%
-  mutate(tipo_modelo = if_else(modelo %in% modelos_volume, "volume", "consumo/economia"),
-         ajuste_elasticidade = !modelo %in% modelos_com_tarifa)
+  mutate(tipo_modelo = if_else(modelo %in% modelos_volume, "volume", "consumo/economia"))
 
-stopifnot(all(escolhas$modelo %in% names(modelos_catalogo)),
-          all(escolhas$agrupamento %in% names(regras_agrupamento)))
+fora_catalogo = setdiff(escolhas$modelo, names(modelos_catalogo))
+if (length(fora_catalogo)) {
+  stop(glue("Modelos da decisão fora do catálogo atual: {paste(fora_catalogo, collapse = ', ')}. ",
+            "Rode os backtests de novo."), call. = FALSE)
+}
+stopifnot(all(escolhas$agrupamento %in% names(regras_agrupamento)))
 
 escolhas %>%
   print(n = Inf)
@@ -271,7 +253,7 @@ escolhas %>%
 # 3. PROJEÇÃO POR SEGMENTO X ALVO ----------------------------------------------
 
 # Projeção de uma categoria (consumo/economia ou volume direto)
-projeta_categoria = function(seg, alvo, cat, agrup, modelo, ajuste_elasticidade,
+projeta_categoria = function(seg, alvo, cat, agrup, modelo,
                              base_chave, econ_chave, mun_exog) {
 
   rotulo = glue("{seg} | {alvo} | {cat} | {agrup} / {modelo}")
@@ -301,7 +283,7 @@ projeta_categoria = function(seg, alvo, cat, agrup, modelo, ajuste_elasticidade,
     select(all_of(chaves_ts)) %>%
     crossing(periodo = periodos_proj)
 
-  cenarios = cenarios_ex_ante(base_ts, grade, fim_hist, glob_proj)
+  cenarios = cenarios_ex_ante(base_ts, grade, fim_hist)
 
   anomalias = anomalias_analogo(base_ts, el_nino_analogo[["inicio"]], el_nino_analogo[["fim"]],
                                 el_nino_suavizacao)
@@ -338,8 +320,7 @@ projeta_categoria = function(seg, alvo, cat, agrup, modelo, ajuste_elasticidade,
            consumo_modelo = case_when(fallback != "modelo" ~ consumo_fb,
                                       eh_volume ~ prev/n_economias,
                                       T ~ prev),
-           eps = unname(coalesce(elasticidade_tarifa[categoria_detalhe], elasticidade_padrao)) *
-             ajuste_elasticidade,
+           eps = unname(coalesce(elasticidade_tarifa[categoria_detalhe], elasticidade_padrao)),
            fator_tarifa = (tarifa/irt_ref)^eps,
            consumo = consumo_modelo * fator_tarifa,
            vol = consumo * n_economias,
@@ -423,8 +404,8 @@ projeta_alvo = function(seg, alvo, escolhas_alvo) {
   ## Categorias ----------------------------------------------------------------
 
   res = escolhas_alvo %>%
-    pmap(function(categoria_detalhe, agrupamento, modelo, ajuste_elasticidade, ...) {
-      projeta_categoria(seg, alvo, categoria_detalhe, agrupamento, modelo, ajuste_elasticidade,
+    pmap(function(categoria_detalhe, agrupamento, modelo, ...) {
+      projeta_categoria(seg, alvo, categoria_detalhe, agrupamento, modelo,
                         base_chave, econ_chave, mun_exog)
     }) %>%
     set_names(escolhas_alvo$categoria_detalhe)
@@ -546,7 +527,6 @@ premissas = tribble(
                           "(intensidade {el_nino_intensidade}, suavização {el_nino_suavizacao} meses)"),
   "Clima (quente_seco / frio_umido)", "média ± 1 desvio-padrão do mês",
   "CAGED", "tendência dos últimos 12 meses",
-  "Nível dos reservatórios", "auto.arima na série histórica",
   "Economias", glue("ETS amortecido no log (séries com {min_obs_econ}+ meses); demais: último valor"),
   "Economias - nível do ETS", paste(names(nivel_economias), map_chr(nivel_economias, paste, collapse = " x "), sep = ": ", collapse = " | "),
   "Economias - premissa da engenharia", if (usar_premissa_economias) {
@@ -635,7 +615,7 @@ write_xlsx(
        anual_categoria = anual_categoria,
        anual_superintendencia = anual_superint,
        mensal = mensal,
-       tarifa_e_nivel = glob_proj %>% mutate(periodo = as.Date(periodo)),
+       tarifa = irt_proj %>% mutate(periodo = as.Date(periodo)),
        exogenas_cenarios = exog_cenarios,
        anomalias_el_nino = anomalias_el_nino,
        premissa_economias = premissa_alocada,

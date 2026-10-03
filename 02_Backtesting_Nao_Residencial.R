@@ -62,7 +62,7 @@ cfg = list(
   agrupamentos = c("G1_municipioA_clusterBC", "G2_superintendencia"),
 
   # Modelos testados (catálogo `modelos_catalogo` em 00_Funcoes.R). vol_* =
-  # volume direto; snaive = benchmark (não é escolhido). Menos modelos = mais rápido.
+  # volume direto; snaive = benchmark (não é escolhido); em empate técnico, ganha o modelo sem drift. Menos modelos = mais rápido.
   modelos = names(modelos_catalogo),
 
   # Economias no teste: "reais" -> o erro medido é o de consumo/economia
@@ -71,9 +71,6 @@ cfg = list(
   # "projetadas" -> erro de volume, somando o erro do ETS das economias.
   economias_teste = "reais",
   economias_agrega_categorias = FALSE,     # ETS no total das categorias do grupo
-
-  # Tarifa nos cenários ex-ante: realizada (reajuste conhecido) | constante
-  tarifa_ex_ante = "realizada",
 
   # Critério de seleção: agregação e modelo escolhidos em cada categoria
   selecao_por     = "categoria_detalhe",    # NULL = uma escolha para o segmento
@@ -157,11 +154,8 @@ write_xlsx(list(decisao = decisao,
                 melhor_modelo = melhor_modelo,
                 melhor_agregacao = melhor_agregacao,
                 elasticidade_geral = imap_dfr(bt, ~ mutate(.x$elasticidades$geral, alvo = .y, .before = 1)),
-                parametros = tibble(parametro = c(names(cfg), "usar_tarifa_no_modelo", "usar_nivel_no_modelo", "usar_caged_no_modelo"),
-                                    valor = c(map_chr(cfg, ~ paste(format(unlist(.x)), collapse = ", ")),
-                                              as.character(usar_tarifa_no_modelo),
-                                              as.character(usar_nivel_no_modelo),
-                                              as.character(usar_caged_no_modelo)))),
+                parametros = tibble(parametro = names(cfg),
+                                    valor = map_chr(cfg, ~ paste(format(unlist(.x)), collapse = ", ")))),
            file.path(cfg$dir_saida, glue("00_Decisao_{nome_arq(cfg$segmento)}.xlsx")))
 
 # Resultados leves (sem os modelos ajustados, que ficam em /modelos)

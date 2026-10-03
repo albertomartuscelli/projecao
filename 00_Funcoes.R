@@ -69,7 +69,9 @@ alvos_def = list(
 # No não residencial o recorte é sempre "Total".
 chaves_ts = c("cd_regiao_adj", "grupo", "categoria_detalhe", "recorte")
 
-regressoras = c("temp_med", "prec_tot", "lag_nv_sim", "tarifa", "caged")
+# Regressoras dos modelos. Tarifa e nível dos reservatórios ficam fora (README):
+# o reajuste entra na projeção pela elasticidade parametrizada.
+regressoras = c("temp_med", "prec_tot", "caged")
 
 mun_atc = c("SAO PAULO", "OSASCO", "GUARULHOS")
 
@@ -87,37 +89,8 @@ regras_agrupamento = list(
                              municipio))
 )
 
-# Tarifa como regressora dos modelos.
-# FALSE (padrão): a tarifa sai dos modelos e o reajuste entra na projeção pela
-# elasticidade parametrizada (03_Projecao.R). Motivos (README, "Tarifa"): o IRT
-# é um índice único estadual com 4-5 degraus na amostra, sempre em transições
-# sazonais (maio; jan/2026), então o coeficiente do ARIMA não é identificado.
-# TRUE: volta a especificação anterior (arima_4 = arima_3 + tarifa), útil para
-# comparar arima_3 x arima_4 no backtest. Mudou? Rode os backtests de novo.
-usar_tarifa_no_modelo = FALSE
-
-# Nível dos reservatórios (Sistema Integrado Metropolitano, t-1) como regressora.
-# FALSE (padrão): sai dos modelos. Motivos (README, "Nível dos reservatórios"):
-# é uma série única da RMSP aplicada a todas as séries (inclusive interior e
-# litoral), colinear com a sazonalidade e a chuva, e o efeito real é por
-# medidas operacionais (ex.: gestão de pressão), não linear no nível. Na
-# projeção ela ainda exige um auto.arima próprio, que ignora os cenários de clima.
-# TRUE: volta a especificação anterior (arima_3 = arima_2 + nível); arima_2 x
-# arima_3 no backtest é o teste direto. Mudou? Rode os backtests de novo.
-usar_nivel_no_modelo = FALSE
-
-# CAGED (estoque de empregos do município/grupo) como regressora.
-# TRUE (padrão): fica como candidata. Com tarifa e nível fora, arima_5 x arima_2
-# (e vol_arima_5 x vol_arima_2) testam só o CAGED, e a seleção por categoria
-# decide. FALSE: arima_5 e vol_arima_5 saem (iguais aos *_2); os modelos *_d1_0
-# e *_D1_0 ficam só com clima.
-usar_caged_no_modelo = TRUE
-
 regs_clima = c("log(temp_med)", "log(prec_tot)")
-regs_nivel = c(regs_clima, if (usar_nivel_no_modelo) "lag_nv_sim")
-regs_todas = c(regs_nivel, if (usar_tarifa_no_modelo) "tarifa", if (usar_caged_no_modelo) "log(caged)")
-# arima_5 / vol_arima_5 só existem se tiverem algo além do clima
-tem_regs_extra = !identical(regs_todas, regs_clima)
+regs_caged = c(regs_clima, "log(caged)")
 
 # ARIMA a partir de texto (ordens e regressoras). constante = FALSE -> "0 + ..."
 arima_def = function(resposta, regs = character(0), pdq = "pdq(0:2, 0:1, 0:2)",
@@ -127,29 +100,32 @@ arima_def = function(resposta, regs = character(0), pdq = "pdq(0:2, 0:1, 0:2)",
 }
 
 # Catálogo de modelos. Cada backtest escolhe os seus em `cfg$modelos`.
-#   arima_0..2   : consumo/economia; regressoras incrementais (temperatura, chuva)
-#   arima_3      : arima_2 + nível (só com usar_nivel_no_modelo = TRUE)
-#   arima_4      : arima_3 + tarifa (só com usar_tarifa_no_modelo = TRUE)
-#   arima_5      : todas as regressoras ligadas (clima + CAGED; + nível, + tarifa)
-#   arima_2_D1   : diferença sazonal forçada (segue o nível do ano anterior)
-#   arima_5_d1_0 : diferença simples forçada, sem constante (sem drift)
-#   vol_*        : volume direto (sem passar pelas economias)
-#   snaive       : benchmark - aparece nas tabelas, mas não é escolhido
+#   arima_0..2       : consumo/economia; ordens automáticas; nenhuma regressora,
+#                      temperatura, temperatura + chuva
+#   arima_2_caged    : arima_2 + CAGED (teste direto do CAGED: x arima_2)
+#   arima_2_dsaz     : arima_2 com diferença sazonal forçada (parte do nível do
+#                      mesmo mês do ano anterior)
+#   arima_2_sem_drift: arima_2 com diferença simples forçada e sem constante
+#                      (não extrapola tendência)
+#   vol_*            : volume direto (sem passar pelas economias)
+#   snaive           : benchmark - aparece nas tabelas, mas não é escolhido
 modelos_catalogo = list(
-  snaive  = SNAIVE(log(consumo)),
-  arima_0 = arima_def("log(consumo)"),
-  arima_1 = arima_def("log(consumo)", "log(temp_med)"),
-  arima_2 = arima_def("log(consumo)", regs_clima),
-  arima_3 = if (usar_nivel_no_modelo) arima_def("log(consumo)", regs_nivel),
-  arima_4 = if (usar_tarifa_no_modelo) arima_def("log(consumo)", c(regs_nivel, "tarifa")),
-  arima_5 = if (tem_regs_extra) arima_def("log(consumo)", regs_todas),
-  arima_2_D1   = arima_def("log(consumo)", regs_clima, PDQ = "PDQ(0:1, 1, 0:1)"),
-  arima_5_d1_0 = arima_def("log(consumo)", regs_todas, pdq = "pdq(0:2, 1, 0:2)", constante = FALSE),
-  vol_arima_2  = arima_def("log(volume)", regs_clima),
-  vol_arima_5  = if (tem_regs_extra) arima_def("log(volume)", regs_todas),
-  vol_arima_5_D1_0 = arima_def("log(volume)", regs_todas, PDQ = "PDQ(0:1, 1, 0:1)", constante = FALSE)
-) %>%
-  compact()
+  snaive            = SNAIVE(log(consumo)),
+  arima_0           = arima_def("log(consumo)"),
+  arima_1           = arima_def("log(consumo)", "log(temp_med)"),
+  arima_2           = arima_def("log(consumo)", regs_clima),
+  arima_2_caged     = arima_def("log(consumo)", regs_caged),
+  arima_2_dsaz      = arima_def("log(consumo)", regs_clima, PDQ = "PDQ(0:1, 1, 0:1)"),
+  arima_2_sem_drift = arima_def("log(consumo)", regs_clima, pdq = "pdq(0:2, 1, 0:2)", constante = FALSE),
+  vol_arima_2       = arima_def("log(volume)", regs_clima),
+  vol_arima_2_caged = arima_def("log(volume)", regs_caged),
+  vol_arima_2_dsaz_sem_drift = arima_def("log(volume)", regs_clima, PDQ = "PDQ(0:1, 1, 0:1)", constante = FALSE)
+)
+
+# Modelos sem drift (sem constante): em empate técnico no backtest, têm
+# preferência, porque o teste de 8 meses quase não pune um drift errado e a
+# projeção vai 16 meses à frente
+modelos_sem_drift = names(modelos_catalogo)[str_detect(names(modelos_catalogo), "sem_drift")]
 
 # Modelos que não podem ser escolhidos (só referência)
 modelos_benchmark = "snaive"
@@ -161,19 +137,12 @@ modelos_volume = names(modelos_catalogo)[str_starts(names(modelos_catalogo), "vo
 # envio aos workers não carregue junto os objetos da função que o chama.
 modelo_economias = list(ets = ETS(log(econ) ~ error("A") + trend("Ad") + season("N")))
 
-# Modelos que já têm a tarifa como regressora (na projeção, não recebem o
-# ajuste de elasticidade, para não contar o efeito duas vezes)
-modelos_com_tarifa = names(modelos_catalogo)[
-  map_lgl(modelos_catalogo, ~ any(str_detect(deparse(.x$formula), "tarifa")))]
-
 # Termos em log -> coeficiente já é elasticidade.
 # Termos em nível -> semi-elasticidade; elasticidade = beta x média no treino.
 termos_elast = tribble(
   ~term,           ~var,                            ~em_log, ~sinal_esperado,
   "log(temp_med)", "Temperatura",                   TRUE,     1,
   "log(prec_tot)", "Precipitação",                  TRUE,    -1,
-  "lag_nv_sim",    "Nível dos Reservatórios (t-1)", FALSE,    1,
-  "tarifa",        "IRT real (Base 100)",           FALSE,   -1,
   "log(caged)",    "CAGED (estoque)",               TRUE,     1
 )
 
@@ -257,10 +226,10 @@ exog_municipal = function(base) {
     ungroup()
 }
 
-# Exógenas globais (1 valor por mês)
+# Exógena global (1 valor por mês): tarifa real, usada só no fator tarifário da projeção
 exog_global = function(base) {
   glob = base %>%
-    distinct(periodo, tarifa, nv_sim, lag_nv_sim) %>%
+    distinct(periodo, tarifa) %>%
     arrange(periodo)
   stopifnot(!anyDuplicated(glob$periodo))
   glob
@@ -456,31 +425,13 @@ resumo_series = function(base_ts, fim_hist, min_obs) {
 
 # 4. EXÓGENAS EX-ANTE ----------------------------------------------------------
 
-# Nível dos reservatórios projetado (série única). lag_nv_sim em t = nv_sim em
-# t-1, então o 1º mês projetado já é conhecido.
-projeta_nivel = function(glob_exog, fim_hist, periodos) {
-  hist = glob_exog %>%
-    filter(yearmonth(periodo) <= fim_hist)
-  fc = hist$nv_sim %>%
-    ts(frequency = 12,
-       start = c(year(min(hist$periodo)), month(min(hist$periodo)))) %>%
-    auto.arima() %>%
-    forecast::forecast(h = length(periodos)) %>%
-    .$mean %>%
-    as.numeric() %>%
-    pmin(1) %>% pmax(0)
-  tibble(periodo = periodos,
-         nv_sim = fc,
-         lag_nv_sim = c(last(hist$nv_sim), head(fc, -1)))
-}
-
 # Cenários ex-ante das exógenas por série:
 #   base        : clima = média do mês no histórico; CAGED = tendência dos
-#                 últimos 12 meses; nível e tarifa vindos de `glob_proj`
+#                 últimos 12 meses
 #   quente_seco : base com temperatura +1 dp e precipitação -1 dp
 #   frio_umido  : base com temperatura -1 dp e precipitação +1 dp
-# `grade`: chaves x períodos futuros. `glob_proj`: periodo, lag_nv_sim, tarifa.
-cenarios_ex_ante = function(hist, grade, fim_hist, glob_proj) {
+# `grade`: chaves x períodos futuros.
+cenarios_ex_ante = function(hist, grade, fim_hist) {
 
   hist = as_tibble(hist) %>%
     filter(periodo <= fim_hist)
@@ -508,7 +459,6 @@ cenarios_ex_ante = function(hist, grade, fim_hist, glob_proj) {
            k = as.numeric(periodo) - as.numeric(fim_hist)) %>%
     left_join(clim, by = c(chaves_ts, "mes")) %>%
     left_join(caged_tend, by = chaves_ts) %>%
-    left_join(glob_proj %>% select(periodo, lag_nv_sim, tarifa), by = "periodo") %>%
     mutate(caged = caged_T * (1 + g)^k)
 
   list(
@@ -590,8 +540,6 @@ resumo_cenarios = function(cenarios, pesos) {
       summarise(temp_med = weighted.mean(temp_med, peso, na.rm = T),
                 prec_tot = weighted.mean(prec_tot, peso, na.rm = T),
                 caged = sum(caged),
-                lag_nv_sim = first(lag_nv_sim),
-                tarifa = first(tarifa),
                 .groups = "drop") %>%
       mutate(cenario = nm)
   })
@@ -678,7 +626,7 @@ monta_fallback = function(base_ts, grade, fim_hist) {
 }
 
 # Resumo do treino e das fórmulas: muda se a base, o tratamento de outliers ou
-# a especificação dos modelos (ex.: usar_tarifa_no_modelo) mudar
+# a especificação dos modelos mudar
 assinatura_treino = function(train, modelos) {
   num = as_tibble(train) %>% select(where(is.numeric))
   list(dados = c(linhas = nrow(num), series = n_distinct(as_tibble(train)[chaves_ts]),
@@ -743,7 +691,7 @@ backtest_agrupamento = function(base_chave, agrup, cfg, ctx) {
   cenarios = c(list(realizado = new_data %>%
                       as_tibble() %>%
                       select(all_of(chaves_ts), periodo, all_of(regressoras))),
-               cenarios_ex_ante(train, new_data, ctx$fim_treino, ctx$glob_proj))
+               cenarios_ex_ante(train, new_data, ctx$fim_treino))
 
   fc = prever(fit_model, cenarios)
 
@@ -1169,9 +1117,7 @@ calc_coeficientes = function(res) {
     medias = r$train %>%
       as_tibble() %>%
       group_by(across(all_of(chaves_ts))) %>%
-      summarise(tarifa_med = mean(tarifa),
-                lag_nv_med = mean(lag_nv_sim),
-                peso = sum(tail(vol_ajust, 12), na.rm = T),
+      summarise(peso = sum(tail(vol_ajust, 12), na.rm = T),
                 .groups = "drop")
 
     map_dfr(compact(r$fit_model),
@@ -1180,9 +1126,7 @@ calc_coeficientes = function(res) {
       left_join(medias, by = chaves_ts) %>%
       mutate(agrupamento = agrup, .before = 1)
   }) %>%
-    mutate(elasticidade = case_when(em_log ~ estimate,
-                                    term == "tarifa" ~ estimate * tarifa_med,
-                                    term == "lag_nv_sim" ~ estimate * lag_nv_med),
+    mutate(elasticidade = if_else(em_log, estimate, NA_real_),
            # p-valor NA quando a matriz de covariância do ARIMA não é positiva
            # definida (aviso "NaNs produced" no fit): tratado como não significante
            sig = factor(if_else(coalesce(p.value <= 0.05, FALSE), "Significante", "Não Significante")),
@@ -1423,20 +1367,11 @@ executa_backtest = function(base, alvo, cfg) {
 
   glob_exog = exog_global(base)
 
-  # Ex-ante: nível projetado; tarifa realizada (reajuste conhecido) ou constante
-  glob_proj = projeta_nivel(glob_exog, fim_treino, periodos_teste) %>%
-    left_join(glob_exog %>% transmute(periodo = yearmonth(periodo), tarifa_real = tarifa),
-              by = "periodo") %>%
-    mutate(tarifa = if (cfg$tarifa_ex_ante == "constante") {
-      glob_exog$tarifa[yearmonth(glob_exog$periodo) == fim_treino]
-    } else tarifa_real)
-
   ctx = list(rotulo = rotulo,
              fim_treino = fim_treino,
              periodos_teste = periodos_teste,
              mun_exog = exog_municipal(base),
-             glob_exog = glob_exog,
-             glob_proj = glob_proj)
+             glob_exog = glob_exog)
 
   ## Outliers (só na janela de treino) -----------------------------------------
 
@@ -1512,14 +1447,15 @@ executa_backtest = function(base, alvo, cfg) {
     mutate(rank = row_number(), .before = 1) %>%
     ungroup()
 
-  # Entre as combinações a até `tolerancia_selecao` p.p. da melhor, fica a
+  # Entre as combinações a até `tolerancia_selecao` p.p. da melhor, fica o
+  # modelo sem drift (mais seguro no horizonte da projeção) e, depois, a
   # agregação com menos séries (mais barata de rodar e de manter)
   melhor_por = ranking %>%
     filter(agrupamento != "LCA", !.model %in% modelos_benchmark) %>%
     left_join(series %>% select(agrupamento, n_series), by = "agrupamento") %>%
     group_by(across(all_of(por))) %>%
     filter(.data[[metrica]] <= min(.data[[metrica]]) + tol) %>%
-    arrange(n_series, .data[[metrica]], .by_group = TRUE) %>%
+    arrange(!.model %in% modelos_sem_drift, n_series, .data[[metrica]], .by_group = TRUE) %>%
     slice(1) %>%
     ungroup()
 
@@ -1590,9 +1526,9 @@ executa_backtest = function(base, alvo, cfg) {
   elasticidades = map(cfg$niveis_elast, ~ resume_elast(coeficientes, .x))
 
   # gráficos do agrupamento mais escolhido; nas agregações usa o 1º modelo
-  # escolhido com regressoras (ou arima_5)
+  # escolhido com regressoras (ou arima_2_caged)
   agrup_elast = names(sort(table(escolha$agrupamento), decreasing = TRUE))[1]
-  mod_elast = c(intersect(escolha$.model, unique(coeficientes$.model)), "arima_5")[1]
+  mod_elast = c(intersect(escolha$.model, unique(coeficientes$.model)), "arima_2_caged")[1]
 
   graf_elast = coeficientes %>%
     filter(agrupamento == agrup_elast) %>%
@@ -1603,7 +1539,8 @@ executa_backtest = function(base, alvo, cfg) {
     keep(~ length(.x) == 1) %>%
     imap(~ graf_elast_nivel(elasticidades[[.y]] %>%
                               filter(agrupamento == agrup_elast, .model == mod_elast),
-                            .x, glue("Elasticidade por {.y} - {mod_elast}")))
+                            .x, glue("Elasticidade por {.y} - {mod_elast}"))) %>%
+    keep(~ nrow(.x$data) > 0)   # sem coeficientes (ex.: só modelos sem regressoras)
 
   ## Estatísticas dos melhores -------------------------------------------------
 
@@ -1725,7 +1662,7 @@ salva_graf = function(g, arq, w = 14, h = 8) {
 
 graf_cenarios_exog = function(cenarios_exog) {
   cenarios_exog %>%
-    pivot_longer(temp_med:tarifa) %>%
+    pivot_longer(c(temp_med, prec_tot, caged)) %>%
     ggplot(aes(x = periodo, y = value, color = cenario)) +
     geom_line(lwd = 1) +
     facet_wrap(~name, scales = "free_y") +
