@@ -176,7 +176,7 @@ def coordenadas_ibge(uf=35):
 municipios = (spark.sql(f"""
     SELECT DISTINCT SUBSTR(CAST(cd_ibge AS STRING), 1, 6) AS cd_ibge, MUNICIPIO AS municipio
     FROM {tabela('gmm_cod_ibge')}
-    WHERE cd_ibge IS NOT NULL""")
+    WHERE cd_ibge IS NOT NULL AND TRIM(CAST(cd_ibge AS STRING)) <> ''""")
     .toPandas()
     .drop_duplicates("cd_ibge"))
 
@@ -230,9 +230,33 @@ def ipca_indice(sgs):
     return out
 
 
-ipca = ipca_indice(serie_sgs(433, INICIO_IPCA))
-grava(ipca, "gmm_projecao_cov_ipca")
-print("IPCA até", ipca.periodo.max())
+def serie_ipca_sidra(inicio):
+    """Plano B: IPCA mensal do IBGE SIDRA (tabela 1737) quando a API do BCB está indisponível."""
+    ini = pd.Timestamp(inicio)
+    r = http_get("https://apisidra.ibge.gov.br/values/t/1737/n1/1/v/63/p/all/d/v63%202", timeout=60)
+    rows = r.json()[1:]  # 1ª linha é cabeçalho
+    df = pd.DataFrame([{"periodo": date(int(x["D3C"][:4]), int(x["D3C"][4:6]), 1),
+                        "valor": float(x["V"])} for x in rows if x["V"] not in ("...", "-", "")])
+    return df[df.periodo >= ini.date()].sort_values("periodo").reset_index(drop=True)
+
+
+try:
+    ipca = ipca_indice(serie_sgs(433, INICIO_IPCA))
+    grava(ipca, "gmm_projecao_cov_ipca")
+    print("IPCA até", ipca.periodo.max())
+except Exception as e_bcb:
+    print(f"API do BCB indisponível ({e_bcb.__class__.__name__}); tentando IBGE SIDRA...")
+    try:
+        ipca = ipca_indice(serie_ipca_sidra(INICIO_IPCA))
+        grava(ipca, "gmm_projecao_cov_ipca")
+        print("IPCA (via SIDRA) até", ipca.periodo.max())
+    except Exception as e_sidra:
+        if existe("gmm_projecao_cov_ipca"):
+            print(f"SIDRA também indisponível ({e_sidra.__class__.__name__}); usando a tabela anterior")
+            ipca = spark.table(tabela("gmm_projecao_cov_ipca")).toPandas()
+            print("IPCA (tabela anterior) até", ipca.periodo.max())
+        else:
+            raise RuntimeError(f"BCB ({e_bcb}) e SIDRA ({e_sidra}) indisponíveis e sem tabela anterior") from e_bcb
 
 try:
     filtro = requests.utils.quote("Indicador eq 'IPCA' and baseCalculo eq 0")
@@ -492,6 +516,9 @@ def caged_estoque(conteudo, inicio=INICIO_CAGED, periodo_esperado=None):
     df = pd.read_excel(io.BytesIO(conteudo), sheet_name="Tabela 8.1", header=None, dtype=object)
     while df.shape[1] and df.iloc[:, -1].isna().all():      # colunas vazias à direita
         df = df.iloc[:, :-1]
+    if df.shape[1] and df.iloc[:, 0].isna().all():           # coluna vazia à esquerda (layout 2026+)
+        df = df.iloc[:, 1:]
+        df.columns = range(df.shape[1])
     n_col = df.shape[1]
     if (n_col - 10) % 5:
         raise ValueError(f"Tabela 8.1 com {n_col} colunas: layout diferente do esperado (5 x meses + 10)")

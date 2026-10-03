@@ -98,6 +98,8 @@ AS t(CATEGORIA_DETALHE, share_min, v_min);
 -- MAGIC    produto e benefício social vêm primeiro; depois o item faturável; por fim, a categoria de uso.
 -- MAGIC    Linhas sem regra ficam com `catego` NULL e serão descartadas no join com o de-para (ver D2).
 -- MAGIC 5. Agregação por PDE-mês. `qtd_registros > 1` indica mais de uma fatura no mês (ver D1).
+-- MAGIC    Volumes somam as faturas; economias pegam o maior valor do mês (são estoque: somar contaria o PDE
+-- MAGIC    duas vezes quando há duas faturas).
 
 -- COMMAND ----------
 
@@ -220,12 +222,13 @@ SELECT
   ID_PDE, catego, cod_ITEM_FAT, CD_ATC, TP_RECORTE, ANO, MES,
   COUNT(*)                                                             AS qtd_registros,
   SUM(QT_DIAS)                                                         AS qt_dias,
-  -- economias
-  SUM(NR_ECONOMIAS)                                                    AS n_economias,
-  SUM(CASE WHEN tem_agua THEN NR_ECONOMIAS ELSE 0 END)                 AS n_economias_agua,
-  SUM(CASE WHEN tem_esg  THEN NR_ECONOMIAS ELSE 0 END)                 AS n_economias_esg,
-  SUM(CASE WHEN tem_esg AND NOT esg_disp THEN NR_ECONOMIAS ELSE 0 END) AS n_economias_esg_real,
-  SUM(CASE WHEN esg_disp THEN NR_ECONOMIAS ELSE 0 END)                 AS n_economias_esg_disp,
+  -- economias: estoque do PDE no mês. MAX, não SUM: com duas faturas no mês
+  -- (1,4% a 2% dos PDEs; ~2% em mar/2026) a soma contava as economias em dobro
+  MAX(NR_ECONOMIAS)                                                    AS n_economias,
+  MAX(CASE WHEN tem_agua THEN NR_ECONOMIAS ELSE 0 END)                 AS n_economias_agua,
+  MAX(CASE WHEN tem_esg  THEN NR_ECONOMIAS ELSE 0 END)                 AS n_economias_esg,
+  MAX(CASE WHEN tem_esg AND NOT esg_disp THEN NR_ECONOMIAS ELSE 0 END) AS n_economias_esg_real,
+  MAX(CASE WHEN esg_disp THEN NR_ECONOMIAS ELSE 0 END)                 AS n_economias_esg_disp,
   -- flags para contar ligações na etapa 3
   MAX(CAST(tem_agua AS INT))                                           AS tem_agua,
   MAX(CAST(tem_esg  AS INT))                                           AS tem_esg,
