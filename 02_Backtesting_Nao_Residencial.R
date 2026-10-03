@@ -92,9 +92,11 @@ cfg = list(
                       superintendencia = "cd_regiao_adj"),
   dim_graf_elast = "categoria_detalhe",
 
-  # LCA (NULL para ignorar). Só ligue se o arquivo tiver a coluna
-  # categoria_detalhe com as categorias não residenciais.
-  arq_lca   = NULL,
+  # LCA (NULL para ignorar); comparada só nos alvos indicados. Use o compilado
+  # bruto da LCA (tp, periodo, categoria, regiao, var, valor), com as categorias
+  # não residenciais: o pareamento por região/categoria é o de lca_de_para().
+  # Um arquivo já pareado só do residencial dá cobertura 0% (aviso no console).
+  arq_lca   = "05_FRAMEWORK_5/01_BASES/compilado_LCA.csv",
   lca_alvos = "med_agua",
 
   # Processamento (Windows/RStudio: multisession)

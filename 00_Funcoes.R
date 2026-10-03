@@ -1361,7 +1361,9 @@ compara_lca = function(lca, base_chave, periodos_teste, alvo_real, cenarios) {
   x_real = if (isTRUE(attr(lca, "bruto"))) {
     real_lca %>%
       lca_de_para() %>%
+      mutate(across(c(regiao_lca, categoria_lca), normaliza_nome)) %>%
       left_join(lca %>%
+                  mutate(across(c(regiao_lca, categoria_lca), normaliza_nome)) %>%
                   group_by(regiao_lca, categoria_lca, periodo) %>%
                   summarise(consumo_lca = sum(vol_med)/sum(n_economias), .groups = "drop"),
                 by = c("regiao_lca", "categoria_lca", "periodo")) %>%
