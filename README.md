@@ -80,7 +80,7 @@ As regras do `02_Análise_Exploratória_e_Ajustes.R` foram para o notebook 03, c
 | Recorte nulo excluído antes de o não residencial virar "Total" | Não residencial vira "Total" antes; residencial sem recorte vira "Urbano" |
 | Séries inválidas pela média por linha de `catego` | Média do total mensal da série, somando os portes |
 | Série sem o último mês excluída inteira | Tolerância de 2 meses |
-| Mar/abr 2026: economias pela participação do volume | Economias 50/50; volumes pela participação histórica |
+| Mar/abr 2026: economias pela participação do volume | Economias interpoladas entre fev e mai; volumes pela participação histórica |
 | ABC por um único mês | Últimos 12 meses |
 | Amostra por linha | Amostra por chave (séries inteiras) |
 | CAGED com `na_locf` sem agrupar por município | Último valor dentro de cada município |

@@ -26,7 +26,7 @@
 -- MAGIC | 1 | Recorte `null`/`0` excluído antes de o não residencial virar "Total" (perdia volume não residencial) | Não residencial vira "Total" antes; no residencial, recorte nulo vira "Urbano" (C1 mostra o volume) |
 -- MAGIC | 2 | Séries inválidas pela média por linha de `catego` (subestimava séries com várias `catego`) | Média do total mensal da série, somando os portes (grandes clientes não caem no corte de 10 economias) |
 -- MAGIC | 3 | Série sem o último mês excluída inteira | Tolerância de 2 meses (`grupo_tolerancia_meses`) |
--- MAGIC | 4 | Mar/abr 2026: economias rateadas pela participação do volume | Economias, ligações e faturas 50/50 (são estoque); volumes pela participação histórica |
+-- MAGIC | 4 | Mar/abr 2026: economias rateadas pela participação do volume | Economias e ligações interpoladas entre fev e mai (são estoque); volumes pela participação histórica |
 -- MAGIC | 5 | Chave sem histórico de mar/abr ficava com volume NA | Participação padrão (0,505) |
 -- MAGIC | 6 | ABC por um único mês (ago/2026) | Últimos 12 meses (`abc_meses`; 1 = regra antiga) |
 -- MAGIC | 7 | `na_locf` do CAGED sem agrupar por município | Último valor dentro de cada município |
@@ -247,12 +247,14 @@ GROUP BY 1, 2 ORDER BY 2, 1;
 -- MAGIC - **Volumes** (medido e faturado, água e esgoto): março = `s` × total do bimestre; abril = (1 − `s`) × total.
 -- MAGIC   `s` = mediana, em 2022-2025, da participação de março no volume medido de água do bimestre, por série × porte;
 -- MAGIC   fora de [`share_min`, `share_max`] ou sem histórico, `share_padrao`.
--- MAGIC - **Economias, ligações e faturas**: metade em cada mês (são estoque; no R iam pela participação do volume,
--- MAGIC   criando um vaivém de ±4% nas economias e consumo por economia idêntico nos dois meses).
+-- MAGIC - **Economias e ligações**: interpolação linear entre fevereiro e maio, por série × porte. São estoque, e o
+-- MAGIC   março bruto traz uma reclassificação entre Social e Social Vulnerável (+6% e −6%) que a divisão 50/50 espalhava
+-- MAGIC   para abril. Série sem fevereiro ou sem maio: metade da soma do bimestre.
+-- MAGIC - **Faturas e dias**: metade em cada mês.
 -- MAGIC
--- MAGIC O backtest continua avaliando mar+abr como um bimestre (`meses_agrupados`). O diagnóstico **D7** mostra como os
--- MAGIC clientes atrasados aparecem em abril; se for uma fatura longa (≈ 60 dias) ou duas faturas, dá para devolver a março
--- MAGIC só o consumo deles, por PDE, e avaliar os meses separadamente.
+-- MAGIC O backtest continua avaliando mar+abr como um bimestre (`meses_agrupados`). O D7 mostrou que não faltaram
+-- MAGIC clientes em março: o ciclo de leitura encurtou (mediana de 29 dias) e o de abril alongou (32 dias). O volume por dia
+-- MAGIC ficou estável, e a participação histórica divide o bimestre de forma equivalente à divisão pelos dias.
 
 -- COMMAND ----------
 
@@ -303,24 +305,57 @@ bimestre AS (
   GROUP BY ALL
 ),
 
+-- Estoques (economias, ligações) no mês antes e no mês depois do bimestre
+vizinhos AS (
+  SELECT v.cd_regiao, v.municipio, v.cd_ibge, v.cd_atc, v.categoria, v.categoria_detalhe, v.recorte, v.porte,
+         SUM(CASE WHEN v.periodo = add_months(p.bimestre_ini, -1) THEN v.n_economias_agua END) AS econ_agua_ant,
+         SUM(CASE WHEN v.periodo = add_months(p.bimestre_ini, 2)  THEN v.n_economias_agua END) AS econ_agua_dep,
+         SUM(CASE WHEN v.periodo = add_months(p.bimestre_ini, -1) THEN v.n_economias_esg END)  AS econ_esg_ant,
+         SUM(CASE WHEN v.periodo = add_months(p.bimestre_ini, 2)  THEN v.n_economias_esg END)  AS econ_esg_dep,
+         SUM(CASE WHEN v.periodo = add_months(p.bimestre_ini, -1) THEN v.n_ligacoes_agua END)  AS lig_agua_ant,
+         SUM(CASE WHEN v.periodo = add_months(p.bimestre_ini, 2)  THEN v.n_ligacoes_agua END)  AS lig_agua_dep,
+         SUM(CASE WHEN v.periodo = add_months(p.bimestre_ini, -1) THEN v.n_ligacoes_esg END)   AS lig_esg_ant,
+         SUM(CASE WHEN v.periodo = add_months(p.bimestre_ini, 2)  THEN v.n_ligacoes_esg END)   AS lig_esg_dep
+  FROM validas v
+  CROSS JOIN p
+  WHERE v.periodo IN (add_months(p.bimestre_ini, -1), add_months(p.bimestre_ini, 2))
+  GROUP BY v.cd_regiao, v.municipio, v.cd_ibge, v.cd_atc, v.categoria, v.categoria_detalhe, v.recorte, v.porte
+),
+
+-- Estoques do bimestre: interpolação linear entre o mês anterior e o seguinte
+-- (k = 1 em março, 2 em abril, sobre 3 intervalos). Sem um dos vizinhos, metade
+-- da soma do bimestre.
+bimestre_estoque AS (
+  SELECT b.*, m.k,
+         COALESCE(z.econ_agua_ant + (z.econ_agua_dep - z.econ_agua_ant) * m.k / 3, b.n_economias_agua / 2) AS econ_agua_i,
+         COALESCE(z.econ_esg_ant  + (z.econ_esg_dep  - z.econ_esg_ant)  * m.k / 3, b.n_economias_esg / 2)  AS econ_esg_i,
+         COALESCE(z.lig_agua_ant  + (z.lig_agua_dep  - z.lig_agua_ant)  * m.k / 3, b.n_ligacoes_agua / 2)  AS lig_agua_i,
+         COALESCE(z.lig_esg_ant   + (z.lig_esg_dep   - z.lig_esg_ant)   * m.k / 3, b.n_ligacoes_esg / 2)   AS lig_esg_i
+  FROM bimestre b
+  CROSS JOIN (SELECT 1 AS k UNION ALL SELECT 2 AS k) m
+  LEFT JOIN vizinhos z USING (cd_regiao, municipio, cd_ibge, cd_atc, categoria, categoria_detalhe, recorte, porte)
+),
+
 rebalanceado AS (
   SELECT cd_regiao, municipio, cd_ibge, cd_atc, categoria, categoria_detalhe, recorte, porte,
          bimestre_ini AS periodo,
          vol_med_agua * s, vol_med_esg * s, vol_fat_agua * s, vol_fat_esg * s,
-         n_economias_agua / 2, n_economias_esg / 2, n_ligacoes_agua / 2, n_ligacoes_esg / 2,
+         econ_agua_i, econ_esg_i, lig_agua_i, lig_esg_i,
          qtd_registros / 2, qt_dias / 2,
          vol_med_agua_bruto * s, vol_fat_agua_bruto * s, vol_med_agua_recorte_imputado * s,
          TRUE
-  FROM bimestre
+  FROM bimestre_estoque
+  WHERE k = 1
   UNION ALL
   SELECT cd_regiao, municipio, cd_ibge, cd_atc, categoria, categoria_detalhe, recorte, porte,
          add_months(bimestre_ini, 1),
          vol_med_agua * (1 - s), vol_med_esg * (1 - s), vol_fat_agua * (1 - s), vol_fat_esg * (1 - s),
-         n_economias_agua / 2, n_economias_esg / 2, n_ligacoes_agua / 2, n_ligacoes_esg / 2,
+         econ_agua_i, econ_esg_i, lig_agua_i, lig_esg_i,
          qtd_registros / 2, qt_dias / 2,
          vol_med_agua_bruto * (1 - s), vol_fat_agua_bruto * (1 - s), vol_med_agua_recorte_imputado * (1 - s),
          TRUE
-  FROM bimestre
+  FROM bimestre_estoque
+  WHERE k = 2
 )
 
 -- Mesma ordem de colunas da etapa 1 (+ rebalanceado)
