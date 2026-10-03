@@ -161,8 +161,8 @@ if (!is.null(premissa_economias)) {
     print()
 }
 
-glob_exog = exog_global(bases$Residencial)
-fim_hist  = yearmonth(max(glob_exog$periodo))
+tarifa_hist = map_dfr(bases, exog_tarifa)
+fim_hist    = yearmonth(max(map_vec(bases, ~ max(.x$periodo))))
 
 n_meses       = as.numeric(yearmonth(fim_projecao)) - as.numeric(fim_hist)
 periodos_proj = fim_hist + seq_len(n_meses)
@@ -171,27 +171,34 @@ message(glue("Histórico até {fim_hist} | projeção {first(periodos_proj)} a {
 
 ## 1.1 Tarifa real -------------------------------------------------------------
 
-ipca_m  = (1 + ipca_aa)^(1/12) - 1
-irt_ult = last(glob_exog$tarifa)
+# Por categoria (IRT da base, montado com a tabela de reajustes do notebook
+# 02_Covariaveis). Referência do fator tarifário: tarifa real média dos
+# últimos 12 meses, que é o nível embutido no consumo recente que o modelo projeta
+ipca_m = (1 + ipca_aa)^(1/12) - 1
 
-# Referência do fator tarifário: tarifa real média dos últimos 12 meses, que é
-# o nível embutido no consumo recente que o modelo projeta
-irt_ref = mean(tail(glob_exog$tarifa, 12))
+irt = tarifa_hist %>%
+  group_by(categoria_detalhe) %>%
+  arrange(periodo, .by_group = TRUE) %>%
+  summarise(irt_ult = last(tarifa), irt_ref = mean(tail(tarifa, 12)), .groups = "drop")
 
-irt_proj = tibble(periodo = periodos_proj) %>%
+irt_proj = irt %>%
+  crossing(periodo = periodos_proj) %>%
+  group_by(categoria_detalhe) %>%
   mutate(k = row_number(),
          tarifa = irt_ult / (1 + ipca_m)^k *
            if_else(periodo >= yearmonth(mes_reajuste), 1 + reajuste_nominal, 1)) %>%
-  select(-k)
+  ungroup() %>%
+  select(periodo, categoria_detalhe, tarifa, irt_ref)
 
 g_premissas = bind_rows(
-  glob_exog %>%
-    transmute(periodo = yearmonth(periodo), tarifa, tipo = "Histórico"),
+  tarifa_hist %>%
+    transmute(periodo = yearmonth(periodo), categoria_detalhe, tarifa, tipo = "Histórico"),
   irt_proj %>%
     mutate(tipo = "Projeção")) %>%
   ggplot(aes(x = periodo, y = tarifa, color = tipo)) +
   geom_line(lwd = 1) +
-  geom_hline(yintercept = irt_ref, linetype = "dashed", color = "grey50") +
+  geom_hline(data = irt, aes(yintercept = irt_ref), linetype = "dashed", color = "grey50") +
+  facet_wrap(~categoria_detalhe) +
   scale_color_manual("", values = c("Histórico" = "black", "Projeção" = "#12d0ff")) +
   labs(title = "Tarifa real (IRT, base 100)",
        subtitle = glue("Reajuste nominal de {percent(reajuste_nominal, 0.1)} em {format(mes_reajuste, '%m/%Y')}, ",
@@ -263,7 +270,7 @@ projeta_categoria = function(seg, alvo, cat, agrup, modelo,
   regra = regras_agrupamento[[agrup]]
   bc = base_chave %>% filter(categoria_detalhe == cat)
 
-  base_ts = monta_base_ts(bc, regra, mun_exog, glob_exog)
+  base_ts = monta_base_ts(bc, regra, mun_exog)
 
   info = resumo_series(base_ts, fim_hist, min_obs_modelo)
   ativas = info %>% filter(ativa)
@@ -312,7 +319,7 @@ projeta_categoria = function(seg, alvo, cat, agrup, modelo,
     left_join(fallback, by = c(chaves_ts, "periodo")) %>%
     left_join(info %>% select(all_of(chaves_ts), elegivel), by = chaves_ts) %>%
     left_join(econ, by = c(chaves_ts, "periodo")) %>%
-    left_join(irt_proj, by = "periodo") %>%
+    left_join(irt_proj, by = c("periodo", "categoria_detalhe")) %>%
     mutate(fallback = case_when(!elegivel ~ "nao_elegivel",
                                 !is.finite(prev) ~ "falha_modelo",
                                 T ~ "modelo"),
@@ -516,8 +523,8 @@ premissas = tribble(
   "Reajuste nominal", percent(reajuste_nominal, 0.1),
   "Mês do reajuste (nas contas)", format(mes_reajuste, "%m/%Y"),
   "IPCA projetado (a.a.)", percent(ipca_aa, 0.1),
-  "IRT real - último", number(irt_ult, 0.01),
-  "IRT real - referência (média 12m)", number(irt_ref, 0.01),
+  "IRT real - último", paste(irt$categoria_detalhe, number(irt$irt_ult, 0.01), sep = ": ", collapse = " | "),
+  "IRT real - referência (média 12m)", paste(irt$categoria_detalhe, number(irt$irt_ref, 0.01), sep = ": ", collapse = " | "),
   "Elasticidade-preço", paste(names(elasticidade_tarifa), elasticidade_tarifa, sep = ": ", collapse = " | "),
   "Sensibilidade da elasticidade", paste(names(elasticidade_sens), elasticidade_sens, sep = " x", collapse = " | "),
   "Cenário principal", cenario_principal,

@@ -340,8 +340,7 @@ SELECT * FROM rebalanceado;
 -- MAGIC |---|---|---|---|
 -- MAGIC | `prec_tot` (mm/dia), `temp_med` (°C) | `gmm_projecao_cov_clima` | município × mês | — (o R interpola buracos) |
 -- MAGIC | `caged` (estoque de empregos) | `gmm_projecao_cov_caged` | município × mês | último valor do próprio município nos meses ainda não divulgados |
--- MAGIC | `nv_sim`, `lag_nv_sim` (fração 0-1) | `gmm_projecao_cov_mananciais` | mês | último valor nos buracos; defasagem de 1 mês |
--- MAGIC | `irt_real` (base jan/2022 = 100) | `gmm_projecao_cov_tarifa` | mês | — |
+-- MAGIC | `irt_real` (base jan/2022 = 100) | `gmm_projecao_cov_tarifa` | categoria × mês | só para o fator de elasticidade da projeção |
 -- MAGIC
 -- MAGIC As colunas e os nomes são os da base antiga, mais `porte`, `n_ligacoes_*`, `qtd_registros`, `qt_dias` (para
 -- MAGIC dias médios por fatura), `vol_*_bruto` (antes da correção de volumes absurdos) e `rebalanceado`.
@@ -354,7 +353,7 @@ b AS (SELECT * FROM `sdb_sbx_adls`.`regulacao`.`gmm_projecao_base_etapa4`),
 fim AS (SELECT MAX(periodo) AS fim FROM b),
 
 meses AS (
-  SELECT explode(sequence(DATE'2016-12-01', (SELECT fim FROM fim), INTERVAL 1 MONTH)) AS periodo
+  SELECT explode(sequence(DATE'2020-01-01', (SELECT fim FROM fim), INTERVAL 1 MONTH)) AS periodo
 ),
 
 caged AS (
@@ -364,18 +363,6 @@ caged AS (
   FROM (SELECT c.cd_ibge, m.periodo FROM (SELECT DISTINCT cd_ibge FROM b) c CROSS JOIN meses m) g
   LEFT JOIN `sdb_sbx_adls`.`regulacao`.`gmm_projecao_cov_caged` c
     ON c.cd_ibge = g.cd_ibge AND c.periodo = g.periodo
-),
-
-nivel AS (
-  SELECT m.periodo,
-         LAST_VALUE(n.nv_sim, TRUE) OVER (ORDER BY m.periodo ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) / 100 AS nv_sim
-  FROM meses m
-  LEFT JOIN `sdb_sbx_adls`.`regulacao`.`gmm_projecao_cov_mananciais` n ON n.periodo = m.periodo
-),
-
-nivel_lag AS (
-  SELECT periodo, nv_sim, LAG(nv_sim) OVER (ORDER BY periodo) AS lag_nv_sim
-  FROM nivel
 )
 
 SELECT
@@ -388,14 +375,13 @@ SELECT
   b.vol_med_agua_bruto, b.vol_fat_agua_bruto, b.vol_med_agua_recorte_imputado, b.rebalanceado,
   cl.prec_tot, cl.temp_med,
   cg.caged,
-  nv.nv_sim, nv.lag_nv_sim,
   t.irt_real
 FROM b
 LEFT JOIN `sdb_sbx_adls`.`regulacao`.`gmm_projecao_base_abc` a       ON a.municipio = b.municipio
 LEFT JOIN `sdb_sbx_adls`.`regulacao`.`gmm_projecao_cov_clima` cl     ON cl.cd_ibge = b.cd_ibge AND cl.periodo = b.periodo
 LEFT JOIN caged cg                                                   ON cg.cd_ibge = b.cd_ibge AND cg.periodo = b.periodo
-LEFT JOIN nivel_lag nv                                               ON nv.periodo = b.periodo
-LEFT JOIN `sdb_sbx_adls`.`regulacao`.`gmm_projecao_cov_tarifa` t     ON t.periodo = b.periodo;
+LEFT JOIN `sdb_sbx_adls`.`regulacao`.`gmm_projecao_cov_tarifa` t
+  ON t.periodo = b.periodo AND t.categoria_detalhe = b.categoria_detalhe;
 
 -- COMMAND ----------
 
@@ -447,7 +433,7 @@ LEFT JOIN `sdb_sbx_adls`.`regulacao`.`gmm_projecao_cov_tarifa` t     ON t.period
 -- MAGIC |---|---|---|
 -- MAGIC | C1 | Para onde vai o volume da base de consumo, mês a mês? | Categorias excluídas ≈ Atacado + Outras + DF; séries inválidas ≪ 1%; recorte imputado pequeno |
 -- MAGIC | C2 | Há chave × porte × mês duplicada? | Nenhuma linha |
--- MAGIC | C3 | Há covariável faltando? | Só `caged` do último mês antes do LOCF; `lag_nv_sim` presente desde jan/2022 |
+-- MAGIC | C3 | Há covariável faltando? | Nenhuma falta (o `caged` do mês ainda não divulgado repete o anterior) |
 -- MAGIC | C4 | O rebalanceamento preservou o bimestre? | Mesmo total em mar+abr; economias iguais nos dois meses |
 -- MAGIC | C5 | A base nova bate com a antiga do R? | Diferenças só pelas correções (volumes absurdos, recorte, séries inválidas) |
 -- MAGIC | D7 | Como os clientes de mar/2026 apareceram em abril? | Define a regra por PDE que substitui o rebalanceamento |
@@ -503,13 +489,11 @@ SELECT periodo, COUNT(*) AS linhas,
        COUNT_IF(prec_tot IS NULL)   AS sem_prec,
        COUNT_IF(temp_med IS NULL)   AS sem_temp,
        COUNT_IF(caged IS NULL)      AS sem_caged,
-       COUNT_IF(nv_sim IS NULL)     AS sem_nv,
-       COUNT_IF(lag_nv_sim IS NULL) AS sem_lag_nv,
        COUNT_IF(irt_real IS NULL)   AS sem_tarifa,
        COUNT_IF(classificacao_abc IS NULL) AS sem_abc
 FROM `sdb_sbx_adls`.`regulacao`.`gmm_projecao_base_analitica`
 GROUP BY periodo
-HAVING sem_prec + sem_temp + sem_caged + sem_nv + sem_lag_nv + sem_tarifa + sem_abc > 0
+HAVING sem_prec + sem_temp + sem_caged + sem_tarifa + sem_abc > 0
 ORDER BY periodo;
 
 -- COMMAND ----------

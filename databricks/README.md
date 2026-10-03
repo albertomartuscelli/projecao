@@ -6,7 +6,7 @@ Três notebooks, rodados nesta ordem, geram o CSV lido pelo framework em R
 | Notebook | Linguagem | O que faz | Tabelas principais (`sdb_sbx_adls.regulacao`) |
 |---|---|---|---|
 | `01_Base_Analitica_Porte.sql` | SQL | Faturas → PDE × mês; porte dos clientes; correção de volumes absurdos; base por categoria × ATC × recorte × porte | `gmm_projecao_fato_pde_mes`, `gmm_projecao_porte_pde`, `gmm_projecao_correcao_pde_mes`, `gmm_projecao_histograma_por_categoria_atc_recorte`, `gmm_projecao_grandes_clientes_pde` |
-| `02_Covariaveis.py` | Python | Covariáveis direto das APIs | `gmm_projecao_cov_ipca`, `_focus_ipca`, `_tarifa`, `_clima`, `_mananciais`, `_caged`, `_municipios` |
+| `02_Covariaveis.py` | Python | Covariáveis direto das APIs | `gmm_projecao_cov_ipca`, `_focus_ipca`, `_reajustes`, `_tarifa`, `_clima`, `_caged`, `_municipios` |
 | `03_Base_Analitica_Final.sql` | SQL (+ Python na exportação) | Ajustes de categoria, recorte, ABC, séries inválidas e mar/abr 2026; junta as covariáveis; exporta o CSV | `gmm_projecao_base_analitica` |
 
 Os notebooks estão no formato "source" do Databricks: importe pelo workspace (*Import → File*).
@@ -32,9 +32,7 @@ databricks fs cp "dbfs:/Volumes/sdb_sbx_adls/regulacao/projecao/05_FRAMEWORK_5/0
 
 | Caminho | Uso | Obrigatório |
 |---|---|---|
-| `02_COVARIADAS/01_RAW/Tarifa_final.csv` | Tabela tarifária (montada à mão) | Sim, para a tarifa |
-| `02_COVARIADAS/02_TRAT/MANANCIAIS_*.csv` | Histórico do nível dos reservatórios antes do alcance da API e referência da agregação mensal | Sim, na 1ª execução |
-| `02_COVARIADAS/02_TRAT/CLIMA_*.csv`, `CAGED_*.csv`, `TARIFA_*.csv` | Validação da migração (seção 7 do 02) | Não |
+| `02_COVARIADAS/02_TRAT/CLIMA_*.csv`, `CAGED_*.csv` | Validação da migração (seção 6 do 02) | Não |
 | `02_COVARIADAS/01_RAW/caged/*.xlsx` | Plano B do CAGED, se o Google Drive falhar | Não |
 | `05_FRAMEWORK_5/01_BASES/antiga/*.csv` | Base antiga do R, para a comparação C5 do 03 | Não |
 | `05_FRAMEWORK_5/01_BASES/*.csv` | Saída do 03 (base e amostra por chave) | — |
@@ -45,17 +43,13 @@ databricks fs cp "dbfs:/Volumes/sdb_sbx_adls/regulacao/projecao/05_FRAMEWORK_5/0
 |---|---|---|
 | IPCA | BCB, SGS 433 | Consultas em blocos de até 10 anos (limite da API) |
 | Focus | BCB, Olinda (expectativas anuais) | Para atualizar `ipca_aa` da projeção |
-| Tarifa | `Tarifa_final.csv` | Regional OC, faixa 1, Residencial Normal; IRT real base jan/2022 = 100 |
+| Tarifa | Tabela de reajustes no próprio notebook (deliberações da Arsesp) + IPCA | IRT real por categoria, base jan/2022 = 100; só para o fator de elasticidade da projeção. Reajuste novo = uma linha |
 | Clima | NASA POWER, diário, comunidade AG | Ponto interno do polígono do município (malha do IBGE); média dos dias; `prec_tot` em **mm/dia** |
-| Nível dos reservatórios | `mananciais.sabesp.com.br/api/v4` (`idSistema = 75`, Sistema Integrado Metropolitano) | Diário → mensal; agregação escolhida pela comparação com o CSV antigo |
 | CAGED | Google Drive do MTE (Tabela 8.1) | API do Drive com chave (secret) ou página pública da pasta; validação estoque(t) − estoque(t−1) = saldo(t) |
 
 Pontos para validar na 1ª execução:
 
-- **Mananciais**: a seção 5 imprime o erro médio de cada agregação mensal (média, primeiro e último dia)
-  contra o CSV antigo. Se nenhuma bater (erro > 0,5 p.p.), o site usa outra regra e vale abrir o
-  `base-dados` no navegador, apertar F12 → Network e ver a chamada que o botão "gerar gráfico" faz.
-- **Clima**: a seção 7 compara com o CSV antigo. Diferenças pequenas são esperadas (malha municipal do IBGE
+- **Clima**: a seção 6 compara com o CSV antigo. Diferenças pequenas são esperadas (malha municipal do IBGE
   em vez do `geobr` 2020); diferenças grandes indicam coordenada errada.
 - **CAGED**: sem a API key, a leitura depende do HTML da pasta pública do Drive. Se falhar, crie a chave
   (Google Cloud → Drive API → credencial "API key"), guarde num secret scope e informe `escopo/chave` no

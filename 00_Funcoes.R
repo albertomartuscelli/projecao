@@ -226,13 +226,14 @@ exog_municipal = function(base) {
     ungroup()
 }
 
-# Exógena global (1 valor por mês): tarifa real, usada só no fator tarifário da projeção
-exog_global = function(base) {
-  glob = base %>%
-    distinct(periodo, tarifa) %>%
-    arrange(periodo)
-  stopifnot(!anyDuplicated(glob$periodo))
-  glob
+# Tarifa real (IRT) por categoria x mês, usada só no fator tarifário da
+# projeção. Base antiga (um IRT para todas) também funciona.
+exog_tarifa = function(base) {
+  tar = base %>%
+    distinct(periodo, categoria_detalhe, tarifa) %>%
+    arrange(categoria_detalhe, periodo)
+  stopifnot(!anyDuplicated(tar[c("periodo", "categoria_detalhe")]))
+  tar
 }
 
 
@@ -361,7 +362,7 @@ graf_outliers = function(base_chave, titulo) {
 
 # 3. SÉRIES POR AGRUPAMENTO ----------------------------------------------------
 
-monta_base_ts = function(base_chave, regra, mun_exog, glob_exog) {
+monta_base_ts = function(base_chave, regra, mun_exog) {
 
   df = base_chave %>%
     mutate(grupo = !!regra)
@@ -405,7 +406,6 @@ monta_base_ts = function(base_chave, regra, mun_exog, glob_exog) {
            # volume modelado (ajustado, com buracos preenchidos)
            volume = consumo * econ_ajust) %>%
     ungroup() %>%
-    left_join(glob_exog %>% mutate(periodo = yearmonth(periodo)), by = "periodo") %>%
     as_tsibble(key = all_of(chaves_ts), index = periodo)
 }
 
@@ -640,7 +640,7 @@ backtest_agrupamento = function(base_chave, agrup, cfg, ctx) {
   message(glue("\n===== {ctx$rotulo} | {agrup} ====="))
   tic(agrup)
 
-  base_ts = monta_base_ts(base_chave, regras_agrupamento[[agrup]], ctx$mun_exog, ctx$glob_exog)
+  base_ts = monta_base_ts(base_chave, regras_agrupamento[[agrup]], ctx$mun_exog)
 
   info_series = resumo_series(base_ts, ctx$fim_treino, cfg$min_obs_treino)
 
@@ -1409,13 +1409,10 @@ executa_backtest = function(base, alvo, cfg) {
   fim_treino = yearmonth(cfg$periodo_corte) - 1
   periodos_teste = yearmonth(cfg$periodo_corte) + 0:(cfg$horizonte - 1)
 
-  glob_exog = exog_global(base)
-
   ctx = list(rotulo = rotulo,
              fim_treino = fim_treino,
              periodos_teste = periodos_teste,
-             mun_exog = exog_municipal(base),
-             glob_exog = glob_exog)
+             mun_exog = exog_municipal(base))
 
   ## Outliers (só na janela de treino) -----------------------------------------
 

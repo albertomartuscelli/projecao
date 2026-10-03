@@ -2,26 +2,25 @@
 # MAGIC %md
 # MAGIC # Covariáveis do framework de projeção (direto das APIs)
 # MAGIC
-# MAGIC Substitui os scripts locais `ETL_CAGED.R`, `ETL_CLIMA.R`, `ETL_MANANCIAIS.R`, `ETL_TARIFA_v4.R` e o
-# MAGIC IPCA do `deflateBR`. Cada seção baixa os dados da fonte e grava uma tabela Delta, lida pelo
+# MAGIC Substitui os scripts locais `ETL_CAGED.R`, `ETL_CLIMA.R`, `ETL_TARIFA_v4.R` e o IPCA do `deflateBR`.
+# MAGIC O nível dos reservatórios (`ETL_MANANCIAIS.R`) saiu: não entra mais nos modelos. Cada seção baixa os dados da fonte e grava uma tabela Delta, lida pelo
 # MAGIC notebook `03_Base_Analitica_Final`.
 # MAGIC
 # MAGIC | Seção | Fonte | Tabela (`sdb_sbx_adls.regulacao`) | Atualização |
 # MAGIC |---|---|---|---|
 # MAGIC | 1 | `gmm_cod_ibge` + malhas do IBGE | `gmm_projecao_cov_municipios` | coordenadas só na 1ª execução |
 # MAGIC | 2 | BCB: SGS 433 (IPCA) e Focus | `gmm_projecao_cov_ipca`, `gmm_projecao_cov_focus_ipca` | completa |
-# MAGIC | 3 | `Tarifa_final.csv` no Volume | `gmm_projecao_cov_tarifa`, `gmm_projecao_cov_tarifa_tabela` | completa |
+# MAGIC | 3 | Reajustes tarifários (tabela no notebook) + IPCA | `gmm_projecao_cov_reajustes`, `gmm_projecao_cov_tarifa` | completa |
 # MAGIC | 4 | NASA POWER (diário → mensal) | `gmm_projecao_cov_clima` | incremental (refaz os últimos 3 meses) |
-# MAGIC | 5 | Sabesp Mananciais (API v4) | `gmm_projecao_cov_mananciais_diario`, `gmm_projecao_cov_mananciais` | incremental |
-# MAGIC | 6 | Novo CAGED (Google Drive do MTE) | `gmm_projecao_cov_caged` | completa (arquivo mais recente) |
-# MAGIC | 7 | CSVs antigos de `02_COVARIADAS/02_TRAT` | — | validação da migração |
+# MAGIC | 5 | Novo CAGED (Google Drive do MTE) | `gmm_projecao_cov_caged` | completa (arquivo mais recente) |
+# MAGIC | 6 | CSVs antigos de `02_COVARIADAS/02_TRAT` | — | validação da migração |
 # MAGIC
 # MAGIC As seções são independentes: se uma fonte falhar, as outras rodam e a tabela anterior continua valendo.
 # MAGIC
 # MAGIC **Arquivos no Volume** (`/Volumes/sdb_sbx_adls/regulacao/projecao`):
-# MAGIC - `02_COVARIADAS/01_RAW/Tarifa_final.csv` (obrigatório para a seção 3; é a tabela tarifária montada à mão)
-# MAGIC - `02_COVARIADAS/02_TRAT/*.csv` (opcional): os CSVs gerados pelos scripts antigos. Servem para validar a
-# MAGIC   migração (seção 7) e para o histórico do nível dos reservatórios antes do alcance da API (seção 5).
+# MAGIC - `02_COVARIADAS/02_TRAT/*.csv` (opcional): os CSVs gerados pelos scripts antigos, para validar a
+# MAGIC   migração (seção 6).
+# MAGIC - `02_COVARIADAS/01_RAW/caged/*.xlsx` (opcional): plano B do CAGED se o Google Drive falhar.
 
 # COMMAND ----------
 
@@ -42,26 +41,22 @@ dbutils.widgets.text("schema", "sdb_sbx_adls.regulacao", "Schema das tabelas")
 dbutils.widgets.text("volume", "/Volumes/sdb_sbx_adls/regulacao/projecao", "Volume dos arquivos")
 dbutils.widgets.dropdown("modo", "incremental", ["incremental", "completo"], "Modo")
 dbutils.widgets.text("drive_api_key", "", "API key do Google Drive (escopo/chave do secret; vazio = sem chave)")
-dbutils.widgets.dropdown("nv_sim_agregacao", "auto", ["auto", "media", "fim_mes", "inicio_mes"],
-                         "Nível mensal dos reservatórios")
 
 SCHEMA = dbutils.widgets.get("schema")
 VOLUME = dbutils.widgets.get("volume").rstrip("/")
 MODO = dbutils.widgets.get("modo")
 DRIVE_SECRET = dbutils.widgets.get("drive_api_key").strip()
-NV_AGREGACAO = dbutils.widgets.get("nv_sim_agregacao")
 
 # Volume: /Volumes/<catálogo>/<schema>/<volume>
 _, _, v_cat, v_sch, v_nome = VOLUME.split("/")[:5]
 spark.sql(f"CREATE VOLUME IF NOT EXISTS {v_cat}.{v_sch}.{v_nome}")
 
 INICIO_CLIMA = "2010-01-01"       # início da série de clima (igual ao ETL_CLIMA.R)
-INICIO_MANANCIAIS = "2016-12-01"  # início da série de mananciais (igual ao ETL_MANANCIAIS.R)
 INICIO_CAGED = "2020-01-01"       # 1º mês da Tabela 8.1 do Novo CAGED
 INICIO_IPCA = "2000-01-01"
 BASE_IRT = "2022-01-01"           # mês base do IRT real (= 100)
 
-print(SCHEMA, VOLUME, MODO, NV_AGREGACAO)
+print(SCHEMA, VOLUME, MODO)
 
 # COMMAND ----------
 
@@ -259,44 +254,72 @@ except Exception as e:
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 3. Tarifa (IRT real)
+# MAGIC ## 3. Tarifa real (IRT) por categoria
 # MAGIC
-# MAGIC Mesma regra do `ETL_TARIFA_v4.R` + `01_Base_Analitica.R`: tarifa de água da faixa 1 do Residencial
-# MAGIC Normal da regional OC, deflacionada pelo IPCA e normalizada em `BASE_IRT` = 100:
+# MAGIC O IRT real é montado a partir da tabela de reajustes abaixo e do IPCA, no lugar do `Tarifa_final.csv`
+# MAGIC (faixa 1 do Residencial Normal da regional OC, montado à mão). Os percentuais são os das deliberações da
+# MAGIC Arsesp; `mes_contas` é o mês em que o reajuste aparece cheio nas contas (a convenção da série antiga: a
+# MAGIC vigência de 10 de maio aparece em junho).
 # MAGIC
-# MAGIC `irt_real(t) = 100 × [p(t) / p(base)] × [IPCA(base) / IPCA(t)]`
+# MAGIC `irt_real(t) = 100 × [N(t) / N(base)] × [IPCA(base) / IPCA(t)]`, com `N` = índice nominal acumulado dos
+# MAGIC reajustes da categoria e base em `BASE_IRT` (jan/2022). Se o IPCA do último mês ainda não saiu, o índice
+# MAGIC repete o último disponível (`ipca_estimado = true`).
 # MAGIC
-# MAGIC Se o IPCA do último mês ainda não saiu, o índice repete o último disponível (`ipca_estimado = true`);
-# MAGIC no R, o `deflateBR` deixava o mês sem tarifa.
+# MAGIC Uso: só o fator de elasticidade da projeção (`03_Projecao.R`), que compara a tarifa projetada com a média
+# MAGIC real dos últimos 12 meses, por categoria. Nenhum modelo usa a tarifa.
 # MAGIC
-# MAGIC A tabela completa (todas as regionais, categorias e faixas) fica em `gmm_projecao_cov_tarifa_tabela`,
-# MAGIC para uma tarifa por categoria no futuro.
+# MAGIC **Para um reajuste novo, acrescente uma linha.** Categoria vazia (`None`) = todas.
 
 # COMMAND ----------
 
-arq_tarifa = f"{VOLUME}/02_COVARIADAS/01_RAW/Tarifa_final.csv"
+CATEGORIAS = ["Residencial Normal", "Residencial Social", "Residencial Social Vulnerável",
+              "Comercial", "Industrial", "Pública"]
 
-if not os.path.exists(arq_tarifa):
-    print(f"Sem {arq_tarifa}: suba o arquivo no Volume. A tabela anterior continua valendo.")
-else:
-    tab = pd.read_csv(arq_tarifa)
-    tab.columns = [c.strip().lower() for c in tab.columns]
-    tab["periodo"] = pd.to_datetime(tab["periodo"]).dt.date
-    grava(tab, "gmm_projecao_cov_tarifa_tabela")
+REAJUSTES = pd.DataFrame([
+    # mes_contas,  vigência,     categoria (None = todas),        %,        fonte
+    ("2022-06-01", "2022-05-10", None,                            12.8019, "Arsesp, reajuste 2022"),
+    ("2023-06-01", "2023-05-10", None,                             9.5609, "Arsesp, reajuste 2023 (inclui revisão extraordinária)"),
+    ("2024-06-01", "2024-05-10", None,                             6.4469, "Arsesp, reajuste 2024"),
+    ("2024-08-01", "2024-07-23", "Residencial Normal",            -1.0,    "Desestatização"),
+    ("2024-08-01", "2024-07-23", "Residencial Social",            -10.0,   "Desestatização"),
+    ("2024-08-01", "2024-07-23", "Residencial Social Vulnerável", -10.0,   "Desestatização"),
+    ("2024-08-01", "2024-07-23", "Comercial",                     -0.5,    "Desestatização"),
+    ("2024-08-01", "2024-07-23", "Industrial",                    -0.5,    "Desestatização"),
+    ("2024-08-01", "2024-07-23", "Pública",                        0.0,    "Desestatização (a confirmar)"),
+    ("2026-04-01", "2026-01-01", None,                             6.1106, "Deliberação Arsesp 1.748/2025 (URAE-1); "
+                                                                           "nas contas em mar/abr 2026"),
+], columns=["mes_contas", "vigencia", "categoria_detalhe", "percentual", "fonte"])
 
-    ref = (tab[(tab.cd_regiao == "OC") & (tab.cd_faixa == 1) & (tab.categoria_detalhe == "Residencial Normal")]
-           [["periodo", "tarifa_agua"]].rename(columns={"tarifa_agua": "p_agua"})
-           .sort_values("periodo").reset_index(drop=True))
-    assert not ref.periodo.duplicated().any(), "Tarifa duplicada por período (OC, faixa 1, Residencial Normal)"
 
-    tarifa = ref.merge(ipca[["periodo", "ipca_indice"]], on="periodo", how="left")
-    tarifa["ipca_estimado"] = tarifa["ipca_indice"].isna()
-    tarifa["ipca_indice"] = tarifa["ipca_indice"].ffill()
-    tarifa["delta"] = tarifa["p_agua"] / tarifa["p_agua"].shift() - 1
-    base = tarifa[tarifa.periodo >= pd.Timestamp(BASE_IRT).date()].iloc[0]
-    tarifa["irt_real"] = 100 * (tarifa["p_agua"] / base.p_agua) * (base.ipca_indice / tarifa["ipca_indice"])
-    grava(tarifa, "gmm_projecao_cov_tarifa")
-    display(tarifa[tarifa.delta.fillna(0) != 0])
+def irt_por_categoria(reajustes, ipca, categorias, inicio, fim):
+    meses = pd.date_range(inicio, fim, freq="MS").date
+    r = reajustes.assign(mes_contas=pd.to_datetime(reajustes["mes_contas"]).dt.date)
+    # reajuste "todas" vira uma linha por categoria
+    r = pd.concat([r[r.categoria_detalhe.notna()],
+                   r[r.categoria_detalhe.isna()].drop(columns="categoria_detalhe")
+                   .merge(pd.DataFrame({"categoria_detalhe": categorias}), how="cross")])
+    linhas = []
+    for cat in categorias:
+        rc = r[r.categoria_detalhe == cat]
+        fator = rc.groupby("mes_contas")["percentual"].apply(lambda p: np.prod(1 + p / 100))
+        nominal = pd.Series(1.0, index=meses)
+        for m, f in fator.items():
+            nominal[nominal.index >= m] *= f
+        linhas.append(pd.DataFrame({"periodo": meses, "categoria_detalhe": cat, "indice_nominal": nominal.values}))
+    out = pd.concat(linhas, ignore_index=True).merge(ipca[["periodo", "ipca_indice"]], on="periodo", how="left")
+    out = out.sort_values(["categoria_detalhe", "periodo"])
+    out["ipca_estimado"] = out["ipca_indice"].isna()
+    out["ipca_indice"] = out.groupby("categoria_detalhe")["ipca_indice"].ffill()
+    base = out[out.periodo == pd.Timestamp(inicio).date()].set_index("categoria_detalhe")
+    out["irt_real"] = (100 * out["indice_nominal"] / out["categoria_detalhe"].map(base["indice_nominal"])
+                       * out["categoria_detalhe"].map(base["ipca_indice"]) / out["ipca_indice"])
+    return out.reset_index(drop=True)
+
+
+grava(REAJUSTES, "gmm_projecao_cov_reajustes")
+tarifa = irt_por_categoria(REAJUSTES, ipca, CATEGORIAS, BASE_IRT, MES_ATUAL)
+grava(tarifa, "gmm_projecao_cov_tarifa")
+display(tarifa.pivot(index="periodo", columns="categoria_detalhe", values="irt_real").round(1).tail(15))
 
 # COMMAND ----------
 
@@ -397,128 +420,7 @@ grava_merge(clima, "gmm_projecao_cov_clima", ["cd_ibge", "periodo"])
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 5. Nível dos reservatórios (Sabesp Mananciais, API v4)
-# MAGIC
-# MAGIC O `ETL_MANANCIAIS.R` abria o site num navegador (chromote) e clicava em "baixar planilha". Aqui a
-# MAGIC leitura é direto na API que o site usa:
-# MAGIC
-# MAGIC - `GET https://mananciais.sabesp.com.br/api/v4/dados/ultima-data`
-# MAGIC - `GET https://mananciais.sabesp.com.br/api/v4/sistemas/dados/resumo-diario/{AAAA-MM-DD}`
-# MAGIC   (todos os sistemas no dia; `idSistema = 75` é o Sistema Integrado Metropolitano, o mesmo
-# MAGIC   `locais=75` do script antigo; campo `volumeUtilArmazenadoPorcentagem`)
-# MAGIC
-# MAGIC Pontos de atenção:
-# MAGIC 1. **Histórico**: há relato de que a API devolve só cerca de 1 ano para trás. Os meses que a API não
-# MAGIC    cobre vêm do CSV antigo (`02_COVARIADAS/02_TRAT/MANANCIAIS_*.csv`, se estiver no Volume).
-# MAGIC 2. **Agregação mensal**: o site entregava o valor mensal pronto (`passoTemporal=mensal`), sem dizer se
-# MAGIC    é média, primeiro ou último dia. Com `nv_sim_agregacao = auto`, o notebook compara as três
-# MAGIC    opções com o CSV antigo nos meses em comum e usa a que bate.
-# MAGIC 3. `nv_sim` fica em % (0-100), como no CSV; o `03_Base_Analitica_Final` divide por 100 e cria a defasagem.
-
-# COMMAND ----------
-
-SABESP_API = "https://mananciais.sabesp.com.br/api/v4"
-SABESP_HEAD = {"Referer": "https://mananciais.sabesp.com.br/", "Accept": "application/json"}
-ID_SIM = 75
-
-
-def sabesp_ultima_data():
-    return pd.Timestamp(http_get(f"{SABESP_API}/dados/ultima-data", headers=SABESP_HEAD).json()["data"]).date()
-
-
-FALHAS_SABESP = []
-
-
-def sabesp_dia(d):
-    try:
-        r = http_get(f"{SABESP_API}/sistemas/dados/resumo-diario/{d.isoformat()}", headers=SABESP_HEAD, timeout=60)
-    except requests.HTTPError:
-        return []                       # dia sem dado
-    except Exception as e:
-        FALHAS_SABESP.append((d, str(e)[:100]))
-        return []
-    return [{"data": d, "id_sistema": int(i["idSistema"]),
-             "volume_util_pct": float(i["volumeUtilArmazenadoPorcentagem"])}
-            for i in r.json().get("data", []) if i.get("volumeUtilArmazenadoPorcentagem") is not None]
-
-
-def nivel_mensal(diario_sim, ultima):
-    """Média, primeiro e último dia de cada mês completo (ao menos 90% dos dias e mês já encerrado)."""
-    d = diario_sim.copy()
-    d["periodo"] = pd.to_datetime(d["data"]).dt.to_period("M").dt.to_timestamp()
-    d = d.sort_values("data")
-    g = d.groupby("periodo")["volume_util_pct"]
-    m = pd.DataFrame({"media": g.mean(), "inicio_mes": g.first(), "fim_mes": g.last(), "dias": g.count()})
-    m["dias_mes"] = m.index.days_in_month
-    fim_mes = m.index + pd.offsets.MonthEnd(0)
-    m = m[(m["dias"] >= np.ceil(0.9 * m["dias_mes"])) & (fim_mes <= pd.Timestamp(ultima))]
-    m = m.drop(columns="dias_mes").reset_index()
-    m["periodo"] = m["periodo"].dt.date
-    return m
-
-
-ultima = sabesp_ultima_data()
-if MODO == "incremental" and existe("gmm_projecao_cov_mananciais_diario"):
-    ult = spark.sql(f"SELECT MAX(data) FROM {tabela('gmm_projecao_cov_mananciais_diario')}").first()[0]
-    inicio = (pd.Timestamp(ult) - pd.Timedelta(days=7)).date()
-else:
-    inicio = pd.Timestamp(INICIO_MANANCIAIS).date()
-
-dias = list(pd.date_range(inicio, ultima, freq="D").date)
-linhas = []
-with ThreadPoolExecutor(max_workers=4) as ex:
-    for res in ex.map(sabesp_dia, dias):
-        linhas.extend(res)
-
-if linhas:
-    grava_merge(pd.DataFrame(linhas), "gmm_projecao_cov_mananciais_diario", ["data", "id_sistema"])
-print(f"Mananciais: {len(dias)} dias pedidos ({inicio} a {ultima}), {len(linhas)} registros, "
-      f"{len(FALHAS_SABESP)} falhas de conexão")
-assert len(FALHAS_SABESP) <= 0.05 * max(len(dias), 1), "Muitas falhas na API de mananciais"
-
-diario_sim = spark.sql(f"""SELECT data, volume_util_pct FROM {tabela('gmm_projecao_cov_mananciais_diario')}
-                           WHERE id_sistema = {ID_SIM}""").toPandas()
-mensal_api = nivel_mensal(diario_sim, ultima)
-
-# CSV antigo: histórico e referência para a agregação
-legado = sorted(f for f in os.listdir(f"{VOLUME}/02_COVARIADAS/02_TRAT")
-                if f.startswith("MANANCIAIS_") and f.endswith(".csv")) \
-    if os.path.isdir(f"{VOLUME}/02_COVARIADAS/02_TRAT") else []
-if legado:
-    ant = pd.read_csv(f"{VOLUME}/02_COVARIADAS/02_TRAT/{legado[-1]}")
-    ant["periodo"] = pd.to_datetime(ant["periodo"]).dt.to_period("M").dt.to_timestamp().dt.date
-    ant = ant[["periodo", "nv_sim"]].drop_duplicates("periodo")
-else:
-    ant = pd.DataFrame(columns=["periodo", "nv_sim"])
-
-agreg = NV_AGREGACAO
-comum = mensal_api.merge(ant, on="periodo")
-if agreg == "auto":
-    if len(comum) >= 3:
-        erros = {a: (comum[a] - comum["nv_sim"]).abs().mean() for a in ["media", "inicio_mes", "fim_mes"]}
-        agreg = min(erros, key=erros.get)
-        print("Erro médio absoluto contra o CSV antigo (p.p.):", {k: round(v, 3) for k, v in erros.items()})
-    else:
-        agreg = "media"
-        print("Sem meses em comum com o CSV antigo: usando a média do mês")
-print("Agregação mensal usada:", agreg)
-
-mananciais = mensal_api[["periodo", agreg, "dias"]].rename(columns={agreg: "nv_sim"})
-mananciais["fonte"] = "api"
-hist = ant[~ant.periodo.isin(mananciais.periodo)].assign(dias=np.nan, fonte="csv_antigo")
-mananciais = pd.concat([hist, mananciais], ignore_index=True).sort_values("periodo").reset_index(drop=True)
-mananciais["agregacao"] = agreg
-grava(mananciais, "gmm_projecao_cov_mananciais")
-
-lacunas = pd.date_range(mananciais.periodo.min(), mananciais.periodo.max(), freq="MS").date
-lacunas = sorted(set(lacunas) - set(mananciais.periodo))
-if lacunas:
-    print("Meses sem nível (o 03 interpola):", lacunas)
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 6. Novo CAGED: estoque de empregos por município
+# MAGIC ## 5. Novo CAGED: estoque de empregos por município
 # MAGIC
 # MAGIC Mesma fonte do `ETL_CAGED.R`: a pasta pública do MTE no Google Drive, com uma subpasta por mês
 # MAGIC (`AAAA-MM`). Do arquivo mais recente, lê a "Tabela 8.1" (estoque, admissões, desligamentos e saldo por
@@ -674,15 +576,13 @@ print(f"{caged.cd_ibge.nunique()} municípios; sem estoque: {caged.estoque.isna(
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 7. Validação contra os CSVs antigos
+# MAGIC ## 6. Validação contra os CSVs antigos
 # MAGIC
 # MAGIC Com os CSVs dos scripts antigos em `02_COVARIADAS/02_TRAT/`, compara as novas tabelas nas chaves em comum.
 # MAGIC Diferenças esperadas:
 # MAGIC - **Clima**: pequenas, porque a malha municipal e o ponto interno vêm de outra fonte. Valores iguais na
 # MAGIC   maioria dos municípios, já que a grade do POWER (0,5° × 0,625°) é bem maior que o arredondamento.
 # MAGIC - **CAGED**: revisões do MTE entre a versão antiga e a nova.
-# MAGIC - **Tarifa**: o `irt_real` antigo era calculado no `01_Base_Analitica.R`, e o CSV só tem `p_agua`; a
-# MAGIC   comparação é do `p_agua`.
 
 # COMMAND ----------
 
@@ -719,8 +619,6 @@ if os.path.isdir(dir_ant):
         res += compara("gmm_projecao_cov_clima", a, ["cd_ibge", "periodo"], ["temp_med", "prec_tot"], mes_txt)
     for a in ult("CAGED_"):
         res += compara("gmm_projecao_cov_caged", a, ["cd_ibge", "periodo"], ["estoque"], mes_txt)
-    for a in ult("TARIFA_"):
-        res += compara("gmm_projecao_cov_tarifa", a, ["periodo"], ["p_agua"], mes_txt)
     display(pd.DataFrame(res))
 else:
     print(f"Sem {dir_ant}: validação ignorada")
@@ -729,7 +627,7 @@ else:
 
 # Resumo das tabelas
 for nome in ["gmm_projecao_cov_ipca", "gmm_projecao_cov_tarifa", "gmm_projecao_cov_clima",
-             "gmm_projecao_cov_mananciais", "gmm_projecao_cov_caged"]:
+             "gmm_projecao_cov_caged"]:
     if existe(nome):
         r = spark.sql(f"SELECT MIN(periodo) ini, MAX(periodo) fim, COUNT(*) n FROM {tabela(nome)}").first()
         print(f"{nome:35s} {r.ini} a {r.fim} ({r.n:,} linhas)")

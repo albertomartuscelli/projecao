@@ -17,7 +17,7 @@ Databricks                                                    R (local)
 | Arquivo | O que faz |
 |---|---|
 | `databricks/01_Base_Analitica_Porte.sql` | Faturas → PDE × mês, porte dos clientes, correção de volumes absurdos, base por categoria × ATC × recorte × porte |
-| `databricks/02_Covariaveis.py` | IPCA, Focus, tarifa, clima, nível dos reservatórios e CAGED direto das fontes |
+| `databricks/02_Covariaveis.py` | IPCA e Focus (BCB), tarifa real por categoria (tabela de reajustes), clima e CAGED |
 | `databricks/03_Base_Analitica_Final.sql` | Ajustes da base (categorias, recorte, ABC, séries inválidas, mar/abr 2026), covariáveis e exportação do CSV |
 | `00_Funcoes.R` | Funções compartilhadas: ETL, outliers, agrupamentos, modelos, cenários, acurácia, elasticidades, gráficos |
 | `01_Backtesting_Residencial.R` | Backtest residencial (categorias × recorte) |
@@ -209,10 +209,16 @@ parametrizada (`elasticidade_tarifa`, no `03_Projecao.R`), aplicada a todos os m
 - **A elasticidade certa vem de microdados**, com variação entre faixas, categorias e tarifa social
   (projeto `elasticidade_tarifa`).
 
+**Tarifa real por categoria.** O IRT vem da tabela de reajustes do notebook `02_Covariaveis` (percentuais
+das deliberações da Arsesp e mês em que chegaram às contas) deflacionada pelo IPCA, uma série por
+categoria. Substitui o `Tarifa_final.csv` (faixa 1 do Residencial Normal da regional OC), que tinha o
+reajuste de 2024 com +6,95% (oficial: 6,45%) e um índice só para todas as categorias. Reajuste novo = uma
+linha na tabela.
+
 Cuidados implementados:
 
-- **Referência.** O fator compara a tarifa projetada com a tarifa real média dos últimos 12 meses, que é o
-  nível já embutido no consumo recente.
+- **Referência.** O fator compara a tarifa projetada com a tarifa real média dos últimos 12 meses da
+  própria categoria, que é o nível já embutido no consumo recente.
 - **Sensibilidade.** As colunas `vol_eps_baixa` e `vol_eps_alta` aplicam 0,5× e 1,5× a elasticidade.
 
 Pontos em aberto:
@@ -222,9 +228,8 @@ Pontos em aberto:
   mar/abr. Se o atraso de 2026 foi pontual, o mais provável é janeiro.
 - **Tamanho do reajuste.** 6,5% nominal repete a média de 2026, que cobriu 16 meses de IPCA. Para um ciclo
   de 12 meses, o reajuste tende a ficar perto do IPCA do período (Focus em `gmm_projecao_cov_focus_ipca`).
-- **`Tarifa_final.csv`.** Os degraus aparecem um mês depois da vigência (jun em vez de mai); o de 2024 sai
-  com +6,95% (oficial: 6,45%); o de 2026, em abr/2026. Com a tarifa fora dos modelos, isso só afeta a
-  referência do fator tarifário.
+- **Redução de jul/2024 na Pública.** A tabela de reajustes usa 0% (a confirmar); as demais categorias
+  seguem a desestatização (−1% residencial, −10% social, −0,5% comercial e industrial).
 - **Série neutra de tarifa.** Com a elasticidade final, dá para tirar do histórico o efeito dos reajustes
   passados (consumo ÷ (IRT/IRT_ref)^ε) antes de ajustar os modelos e reaplicar na projeção. Hoje o efeito
   passado fica embutido no nível e na tendência do ARIMA.
@@ -246,8 +251,9 @@ O nível do Sistema Integrado Metropolitano não entra nos modelos. Motivos:
 - **Projeção sem cenário.** Exigia um `auto.arima` próprio que ignorava os cenários de clima.
 
 A alternativa para o efeito real é uma variável de intervenção nas séries da RMSP (1 nos meses com gestão
-de pressão ou restrição), com o cenário de manter ou retirar a medida em 2027. O notebook `02_Covariaveis`
-continua gravando o nível, para essa análise.
+de pressão ou restrição), com o cenário de manter ou retirar a medida em 2027. A extração do nível saiu
+do `02_Covariaveis`; o script antigo (`legado/ETL_MANANCIAIS.R`) e a API v4 da Sabesp ficam como
+referência se for preciso retomá-la.
 
 ### CAGED: candidato, decidido no backtest
 
