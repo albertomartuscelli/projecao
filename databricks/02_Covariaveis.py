@@ -1,4 +1,12 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "6"
+# dependencies = [
+#   "shapely",
+#   "openpyxl",
+# ]
+# ///
 # MAGIC %md
 # MAGIC # Covariáveis do framework de projeção (direto das APIs)
 # MAGIC
