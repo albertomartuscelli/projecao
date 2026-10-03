@@ -252,8 +252,9 @@ O nível do Sistema Integrado Metropolitano não entra nos modelos. Motivos:
 
 A alternativa para o efeito real é uma variável de intervenção nas séries da RMSP (1 nos meses com gestão
 de pressão ou restrição), com o cenário de manter ou retirar a medida em 2027. A extração do nível saiu
-do `02_Covariaveis`; o script antigo (`legado/ETL_MANANCIAIS.R`) e a API v4 da Sabesp ficam como
-referência se for preciso retomá-la.
+do `02_Covariaveis`. Para retomar: `legado/ETL_MANANCIAIS.R` ou a API v4 da Sabesp
+(`https://mananciais.sabesp.com.br/api/v4/sistemas/dados/resumo-diario/AAAA-MM-DD`, `idSistema = 75`,
+campo `volumeUtilArmazenadoPorcentagem`; cabeçalho `Referer: https://mananciais.sabesp.com.br/`).
 
 ### CAGED: candidato, decidido no backtest
 
