@@ -1597,7 +1597,7 @@ executa_backtest = function(base, alvo, cfg) {
 
   ## Exportação ----------------------------------------------------------------
 
-  write_xlsx(
+  grava_xlsx(
     c(list(decisao = decisao,
            melhor_modelo = tab_modelos,
            melhor_agregacao = tab_agregacao,
@@ -1614,7 +1614,7 @@ executa_backtest = function(base, alvo, cfg) {
            picos_teste = picos_teste %>% mutate(periodo = as.Date(periodo)))),
     file.path(cfg$dir_saida, glue("01_Acuracia_{rotulo}.xlsx")))
 
-  write_xlsx(
+  grava_xlsx(
     list(real_x_forecast = fit_x_real %>%
            group_by(agrupamento, cenario, .model, cd_regiao_adj, categoria_detalhe, recorte, periodo) %>%
            summarise(across(c(n_economias, vol_med_real, vol_med_fit), ~ sum(., na.rm = T)),
@@ -1624,7 +1624,7 @@ executa_backtest = function(base, alvo, cfg) {
          cenarios_exogenas = cenarios_exog %>% mutate(periodo = as.Date(periodo))),
     file.path(cfg$dir_saida, glue("02_Real_x_Forecast_{rotulo}.xlsx")))
 
-  write_xlsx(
+  grava_xlsx(
     c(set_names(elasticidades, paste0("elast_", names(elasticidades))),
       list(coeficientes = coeficientes)),
     file.path(cfg$dir_saida, glue("03_Elasticidades_{rotulo}.xlsx")))
@@ -1656,8 +1656,26 @@ executa_backtest = function(base, alvo, cfg) {
 
 # 10. GRÁFICOS E EXPORTAÇÃO ----------------------------------------------------
 
+# Gráfico que falha não interrompe o backtest (só avisa)
 salva_graf = function(g, arq, w = 14, h = 8) {
-  ggsave(arq, g, width = w, height = h, dpi = 150)
+  tryCatch(ggsave(arq, g, width = w, height = h, dpi = 150),
+           error = function(e) warning(glue("Gráfico não salvo ({basename(arq)}): {conditionMessage(e)}"),
+                                       call. = FALSE))
+}
+
+# Excel com o caminho completo no console. Se o arquivo estiver aberto (Excel
+# bloqueia no Windows), salva com a hora no nome em vez de parar o script.
+grava_xlsx = function(x, arq) {
+  dir.create(dirname(arq), recursive = TRUE, showWarnings = FALSE)
+  ok = tryCatch({ write_xlsx(x, arq); TRUE }, error = function(e) FALSE)
+  if (!ok) {
+    alt = sub("\\.xlsx$", glue("_{format(Sys.time(), '%H%M%S')}.xlsx"), arq)
+    write_xlsx(x, alt)
+    warning(glue("{basename(arq)} estava aberto ou bloqueado: salvo como {basename(alt)}"), call. = FALSE)
+    arq = alt
+  }
+  message("Salvo: ", normalizePath(arq))
+  invisible(arq)
 }
 
 graf_cenarios_exog = function(cenarios_exog) {

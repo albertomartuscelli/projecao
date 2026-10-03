@@ -607,7 +607,7 @@ graficos
 iwalk(graficos, ~ salva_graf(.x, file.path(dir_saida, "graficos",
                                            glue("{.y}_{format(fim_projecao, '%Y%m')}.png"))))
 
-write_xlsx(
+grava_xlsx(
   list(premissas = premissas,
        escolhas = escolhas,
        series = series,

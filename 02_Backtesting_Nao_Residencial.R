@@ -150,7 +150,7 @@ decisao = map_dfr(bt, "decisao")
 decisao %>%
   print()
 
-write_xlsx(list(decisao = decisao,
+grava_xlsx(list(decisao = decisao,
                 melhor_modelo = melhor_modelo,
                 melhor_agregacao = melhor_agregacao,
                 elasticidade_geral = imap_dfr(bt, ~ mutate(.x$elasticidades$geral, alvo = .y, .before = 1)),
