@@ -65,7 +65,7 @@ Pontos para validar na 1ª execução:
 | Não residencial | — | Recorte "Total" |
 | ABC dos municípios | `abc_meses`, `abc_corte_a`, `abc_corte_b` | 12 meses; 80% / 95% |
 | Série inválida | `grupo_min_economias`, `grupo_min_volume`, `grupo_tolerancia_meses` | 10 economias; 100 m³; 2 meses |
-| Mar/abr 2026 | `bimestre_ini`, `share_*` | Volumes pela participação histórica de março; economias e ligações interpoladas entre fev e mai |
+| Mar/abr 2026 | `bimestre_ini`, `share_*` | Volumes: divisão entre categorias residenciais pela de fev+mai e entre os meses pela participação histórica; economias e ligações interpoladas entre fev e mai |
 | Santo André | `params_municipio_ajuste` | OC, ATC 72 |
 
 O diagnóstico **D7** mostra como os clientes de mar/2026 aparecem em abril (uma fatura longa, duas faturas

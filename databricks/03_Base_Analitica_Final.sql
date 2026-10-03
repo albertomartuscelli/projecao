@@ -250,6 +250,12 @@ GROUP BY 1, 2 ORDER BY 2, 1;
 -- MAGIC - **Economias e ligações**: interpolação linear entre fevereiro e maio, por série × porte. São estoque, e o
 -- MAGIC   março bruto traz uma reclassificação entre Social e Social Vulnerável (+6% e −6%) que a divisão 50/50 espalhava
 -- MAGIC   para abril. Série sem fevereiro ou sem maio: metade da soma do bimestre.
+-- MAGIC - **Divisão entre categorias residenciais**: em mar/2026 houve uma reclassificação temporária de Social
+-- MAGIC   Vulnerável para Social (volume do bimestre: Social +5,3% e Vulnerável −4,0% sobre 2× fevereiro; somados, +2,1%,
+-- MAGIC   igual ao Normal). O volume do bimestre de cada grupo (superintendência, município, ATC, categoria, recorte e
+-- MAGIC   porte) é redistribuído entre as `categoria_detalhe` pela divisão de fevereiro + maio. O total do grupo não muda;
+-- MAGIC   no não residencial o grupo tem uma categoria só e nada muda. PDEs com duas categorias no mesmo mês são
+-- MAGIC   estruturais (~79 mil por mês, ~1,55% do volume, sem pico em março) e não explicam o problema.
 -- MAGIC - **Faturas e dias**: metade em cada mês.
 -- MAGIC
 -- MAGIC O backtest continua avaliando mar+abr como um bimestre (`meses_agrupados`). O D7 mostrou que não faltaram
@@ -287,7 +293,7 @@ share AS (
   GROUP BY ALL
 ),
 
-bimestre AS (
+bimestre_bruto AS (
   SELECT v.cd_regiao, v.municipio, v.cd_ibge, v.cd_atc, v.categoria, v.categoria_detalhe, v.recorte, v.porte,
          CASE WHEN sh.s BETWEEN p.share_min AND p.share_max THEN sh.s ELSE p.share_padrao END AS s,
          p.bimestre_ini,
@@ -303,6 +309,58 @@ bimestre AS (
   LEFT JOIN share sh USING (cd_regiao, municipio, cd_ibge, cd_atc, categoria, categoria_detalhe, recorte, porte)
   WHERE v.periodo IN (p.bimestre_ini, add_months(p.bimestre_ini, 1))
   GROUP BY ALL
+),
+
+-- Volume de cada série em fevereiro + maio (meses vizinhos sem o problema)
+vizinhos_vol AS (
+  SELECT v.cd_regiao, v.municipio, v.cd_ibge, v.cd_atc, v.categoria, v.categoria_detalhe, v.recorte, v.porte,
+         SUM(v.vol_med_agua) AS fm_med_agua, SUM(v.vol_med_esg) AS fm_med_esg,
+         SUM(v.vol_fat_agua) AS fm_fat_agua, SUM(v.vol_fat_esg) AS fm_fat_esg
+  FROM validas v
+  CROSS JOIN p
+  WHERE v.periodo IN (add_months(p.bimestre_ini, -1), add_months(p.bimestre_ini, 2))
+  GROUP BY v.cd_regiao, v.municipio, v.cd_ibge, v.cd_atc, v.categoria, v.categoria_detalhe, v.recorte, v.porte
+),
+
+-- Em mar/2026 houve reclassificação temporária entre categorias residenciais
+-- (Social Vulnerável -> Social): o total da série está certo, a divisão não.
+-- O volume do bimestre de cada grupo (mesma superintendência, município, ATC,
+-- categoria, recorte e porte) é redistribuído entre as categorias_detalhe pela
+-- divisão de fev+mai. No não residencial o grupo tem uma categoria só (nada muda).
+-- Séries sem fev/mai mantêm o próprio volume. O total do grupo é preservado.
+grupo_bim AS (
+  SELECT b.*, z.fm_med_agua, z.fm_med_esg, z.fm_fat_agua, z.fm_fat_esg,
+    SUM(CASE WHEN z.fm_med_agua > 0 THEN b.vol_med_agua END) OVER w AS g_bim_med_agua,
+    SUM(CASE WHEN z.fm_med_agua > 0 THEN z.fm_med_agua END)  OVER w AS g_fm_med_agua,
+    SUM(CASE WHEN z.fm_med_esg  > 0 THEN b.vol_med_esg END)  OVER w AS g_bim_med_esg,
+    SUM(CASE WHEN z.fm_med_esg  > 0 THEN z.fm_med_esg END)   OVER w AS g_fm_med_esg,
+    SUM(CASE WHEN z.fm_fat_agua > 0 THEN b.vol_fat_agua END) OVER w AS g_bim_fat_agua,
+    SUM(CASE WHEN z.fm_fat_agua > 0 THEN z.fm_fat_agua END)  OVER w AS g_fm_fat_agua,
+    SUM(CASE WHEN z.fm_fat_esg  > 0 THEN b.vol_fat_esg END)  OVER w AS g_bim_fat_esg,
+    SUM(CASE WHEN z.fm_fat_esg  > 0 THEN z.fm_fat_esg END)   OVER w AS g_fm_fat_esg
+  FROM bimestre_bruto b
+  LEFT JOIN vizinhos_vol z USING (cd_regiao, municipio, cd_ibge, cd_atc, categoria, categoria_detalhe, recorte, porte)
+  WINDOW w AS (PARTITION BY b.cd_regiao, b.municipio, b.cd_ibge, b.cd_atc, b.categoria, b.recorte, b.porte)
+),
+
+bimestre AS (
+  SELECT cd_regiao, municipio, cd_ibge, cd_atc, categoria, categoria_detalhe, recorte, porte, s, bimestre_ini,
+         med_agua AS vol_med_agua, med_esg AS vol_med_esg, fat_agua AS vol_fat_agua, fat_esg AS vol_fat_esg,
+         vol_med_agua_bruto * f_med AS vol_med_agua_bruto, vol_fat_agua_bruto * f_fat AS vol_fat_agua_bruto,
+         vol_med_agua_recorte_imputado * f_med AS vol_med_agua_recorte_imputado,
+         n_economias_agua, n_economias_esg, n_ligacoes_agua, n_ligacoes_esg, qtd_registros, qt_dias
+  FROM (
+    SELECT *,
+      CASE WHEN fm_med_agua > 0 THEN g_bim_med_agua * fm_med_agua / g_fm_med_agua ELSE vol_med_agua END AS med_agua,
+      CASE WHEN fm_med_esg  > 0 THEN g_bim_med_esg  * fm_med_esg  / g_fm_med_esg  ELSE vol_med_esg  END AS med_esg,
+      CASE WHEN fm_fat_agua > 0 THEN g_bim_fat_agua * fm_fat_agua / g_fm_fat_agua ELSE vol_fat_agua END AS fat_agua,
+      CASE WHEN fm_fat_esg  > 0 THEN g_bim_fat_esg  * fm_fat_esg  / g_fm_fat_esg  ELSE vol_fat_esg  END AS fat_esg,
+      COALESCE(CASE WHEN fm_med_agua > 0 THEN g_bim_med_agua * fm_med_agua / g_fm_med_agua END
+               / NULLIF(vol_med_agua, 0), 1) AS f_med,
+      COALESCE(CASE WHEN fm_fat_agua > 0 THEN g_bim_fat_agua * fm_fat_agua / g_fm_fat_agua END
+               / NULLIF(vol_fat_agua, 0), 1) AS f_fat
+    FROM grupo_bim
+  )
 ),
 
 -- Estoques (economias, ligações) no mês antes e no mês depois do bimestre
