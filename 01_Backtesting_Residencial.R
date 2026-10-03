@@ -96,7 +96,9 @@ cfg = list(
                       categoria_recorte = c("categoria_detalhe", "recorte")),
   dim_graf_elast = "recorte",
 
-  # LCA (NULL para ignorar); comparada só nos alvos indicados
+  # LCA (NULL para ignorar); comparada só nos alvos indicados. Aceita o
+  # compilado bruto da LCA (tp, periodo, categoria, regiao, var, valor), que é
+  # pareado por região/categoria em lca_de_para(), ou um arquivo já pareado
   arq_lca   = "05_FRAMEWORK_5/01_BASES/compilado_LCA.csv",
   lca_alvos = "med_agua",
 

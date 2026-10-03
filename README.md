@@ -279,6 +279,11 @@ de `cfg$modelos`.
   backtest avalia mar+abr/2026 como um único período (`meses_agrupados`).
 - Linhas sem volume ou sem economias saem da modelagem; os buracos são
   interpolados no consumo e marcados como `IMPUTADO` no histórico da projeção.
-- A LCA é lida de `05_FRAMEWORK_5/01_BASES/compilado_LCA.csv`; sem o arquivo,
-  a comparação é ignorada com um aviso.
+- A LCA é lida de `cfg$arq_lca`; sem o arquivo, a comparação é ignorada com um
+  aviso. O benchmark é o consumo/economia da LCA × as economias reais. Aceita o
+  compilado bruto (`tp, periodo, categoria, regiao, var, valor`): o consumo da
+  LCA, que vem por região (capital = "M"; OI+OX, OC+OS, OM+OP, OT+OU) e por
+  Normal/Social, é pareado com cada série em `lca_de_para()`. Também aceita um
+  arquivo já pareado nas chaves do framework. Mar+abr/2026 são agregados só nas
+  métricas; os gráficos mostram os meses separados.
 - Os scripts são lidos como UTF-8 (padrão do R 4.2+ no Windows).

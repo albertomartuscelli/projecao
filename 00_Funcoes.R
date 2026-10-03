@@ -1282,10 +1282,29 @@ resume_diag = function(estat_series, resumo_fallback, melhores) {
 
 # 8. LCA -----------------------------------------------------------------------
 
-# Previsão da consultoria (vol_med e n_economias). O nível de comparação é
-# detectado pelas colunas presentes no arquivo. Volume LCA = consumo LCA x
-# economias reais, igual aos modelos.
+# Previsão da consultoria. O benchmark é o consumo/economia da LCA:
+# volume LCA = consumo LCA x economias reais, igual aos modelos.
+# Dois formatos de arquivo:
+#   bruto   : compilado da LCA (colunas tp, periodo, categoria, regiao, var,
+#             valor), na granularidade dela (regiões e Normal/Social). O
+#             consumo é pareado com as séries por `lca_de_para()`.
+#   pareado : já nas chaves do framework (vol_med e n_economias); o nível de
+#             comparação é detectado pelas colunas presentes.
 lca_chaves_possiveis = c("cd_regiao_adj", "cd_regiao", "municipio", "categoria_detalhe", "recorte")
+
+# Granularidade da LCA: capital = "M"; algumas superintendências em pares;
+# residencial só Normal e Social (Social Vulnerável usa o Social)
+lca_de_para = function(df) {
+  df %>%
+    mutate(regiao_lca = case_when(str_starts(cd_regiao_adj, "SP_") ~ "M",
+                                  cd_regiao_adj %in% c("OI", "OX") ~ "OIOX",
+                                  cd_regiao_adj %in% c("OC", "OS") ~ "OCOS",
+                                  cd_regiao_adj %in% c("OM", "OP") ~ "OMOP",
+                                  cd_regiao_adj %in% c("OT", "OU") ~ "OTOU",
+                                  T ~ cd_regiao_adj),
+           categoria_lca = if_else(str_starts(categoria_detalhe, "Residencial Social"),
+                                   "Residencial Social", categoria_detalhe))
+}
 
 carrega_lca = function(arq) {
 
@@ -1306,7 +1325,20 @@ carrega_lca = function(arq) {
   }
   lca$periodo = yearmonth(lca$periodo)
 
-  attr(lca, "chaves") = intersect(lca_chaves_possiveis, names(lca))
+  if (all(c("regiao", "categoria", "var", "valor") %in% names(lca))) {
+    # bruto: projeção (tp = PROJ, se houver) de volume e economias de água
+    if ("tp" %in% names(lca) && any(lca$tp == "PROJ")) lca = filter(lca, tp == "PROJ")
+    lca = lca %>%
+      filter(var %in% c("vol_med_agua", "econ_agua")) %>%
+      pivot_wider(id_cols = c(periodo, categoria, regiao), names_from = var,
+                  values_from = valor, values_fn = sum) %>%
+      transmute(periodo, regiao_lca = regiao, categoria_lca = categoria,
+                vol_med = vol_med_agua, n_economias = econ_agua)
+    attr(lca, "chaves") = c("cd_regiao_adj", "categoria_detalhe", "recorte")
+    attr(lca, "bruto") = TRUE
+  } else {
+    attr(lca, "chaves") = intersect(lca_chaves_possiveis, names(lca))
+  }
   lca
 }
 
@@ -1326,11 +1358,21 @@ compara_lca = function(lca, base_chave, periodos_teste, alvo_real, cenarios) {
               .groups = "drop")
 
   # consumo do nível = soma do volume / soma das economias
-  x_real = real_lca %>%
-    left_join(lca %>%
-                group_by(across(all_of(chaves)), periodo) %>%
-                summarise(consumo_lca = sum(vol_med)/sum(n_economias), .groups = "drop"),
-              by = c(chaves, "periodo"))
+  x_real = if (isTRUE(attr(lca, "bruto"))) {
+    real_lca %>%
+      lca_de_para() %>%
+      left_join(lca %>%
+                  group_by(regiao_lca, categoria_lca, periodo) %>%
+                  summarise(consumo_lca = sum(vol_med)/sum(n_economias), .groups = "drop"),
+                by = c("regiao_lca", "categoria_lca", "periodo")) %>%
+      select(-regiao_lca, -categoria_lca)
+  } else {
+    real_lca %>%
+      left_join(lca %>%
+                  group_by(across(all_of(chaves)), periodo) %>%
+                  summarise(consumo_lca = sum(vol_med)/sum(n_economias), .groups = "drop"),
+                by = c(chaves, "periodo"))
+  }
 
   cobertura = x_real %>%
     summarise(perc_vol_coberto = sum(vol_med_real[!is.na(consumo_lca)])/sum(vol_med_real))
@@ -1428,7 +1470,9 @@ executa_backtest = function(base, alvo, cfg) {
 
   # Meses avaliados em conjunto (ex.: mar+abr/2026 como um bimestre)
   fit_x_aval = agrupa_meses(fit_x_real, cfg$meses_agrupados)
-  if (!is.null(lca)) lca$x_real = agrupa_meses(lca$x_real, cfg$meses_agrupados)
+  # Só nas métricas: os gráficos usam os meses separados, como os modelos
+  lca_aval = lca
+  if (!is.null(lca)) lca_aval$x_real = agrupa_meses(lca$x_real, cfg$meses_agrupados)
 
   ## Seleção -------------------------------------------------------------------
   # Com `selecao_por` (ex.: categoria_detalhe), a métrica do nível de seleção é
@@ -1438,7 +1482,7 @@ executa_backtest = function(base, alvo, cfg) {
   metrica = cfg$metrica_selecao
   tol = cfg$tolerancia_selecao %||% 0
 
-  acc_sel = calc_acc(fit_x_aval, unique(c(cfg$niveis[[cfg$nivel_selecao]], por)), lca, por = por) %>%
+  acc_sel = calc_acc(fit_x_aval, unique(c(cfg$niveis[[cfg$nivel_selecao]], por)), lca_aval, por = por) %>%
     filter(cenario == cfg$cenario_selecao)
 
   ranking = acc_sel %>%
@@ -1482,9 +1526,9 @@ executa_backtest = function(base, alvo, cfg) {
   }
   fit_x_comb = combina(fit_x_real)
 
-  acc = map(cfg$niveis, ~ calc_acc(bind_rows(fit_x_aval, combina(fit_x_aval)), .x, lca))
+  acc = map(cfg$niveis, ~ calc_acc(bind_rows(fit_x_aval, combina(fit_x_aval)), .x, lca_aval))
 
-  acc_detalhe_superint = calc_acc(bind_rows(fit_x_aval, combina(fit_x_aval)), "cd_regiao_adj", lca, detalhe = T)
+  acc_detalhe_superint = calc_acc(bind_rows(fit_x_aval, combina(fit_x_aval)), "cd_regiao_adj", lca_aval, detalhe = T)
 
   comb_total = acc$total %>%
     filter(agrupamento == "COMBINADO", cenario == cfg$cenario_selecao)
